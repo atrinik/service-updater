@@ -13,6 +13,17 @@ disk serial, separate backup filesystem, stopped production unit/container,
 loaded production start fence, migration marker and production certificate
 fingerprint. Development state and identity must differ from production. Unit,
 lock, admin socket, state and deployment paths are mandatory configuration.
+The loaded production fence is checked through the system manager's D-Bus API
+using the installed `busctl` utility. The controller resolves the configured
+unit with `GetUnit`, checks its exact canonical `Id`, then requires a typed
+`Conditions` tuple for non-trigger, negated `ConditionPathExists` with the exact
+migration-marker path. A missing/aliased unit, empty conditions, wrong tuple,
+malformed output or query failure is rejected. The historical evaluation state
+may be zero (not evaluated); it does not replace the configured condition.
+This avoids systemd versions that render `systemctl show Conditions` as
+`[unprintable]`, while still requiring both the on-disk fence and loaded condition.
+See the [systemd D-Bus Conditions contract](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
+
 Deployment installs its reviewed nftables rules as `closed.nft` and `public.nft`
 under the configured root. Both rules must retain the deployment's other fences;
 closed access must include loopback to prevent candidate writes before acceptance.
