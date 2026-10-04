@@ -35,7 +35,10 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "installation_root": {
       "type": "string",
@@ -134,12 +137,99 @@
       "pattern": "^atrinik/classic$"
     },
     "release_image": {
-      "type": "string",
-      "pattern": "^ghcr\\.io/atrinik/classic-server$"
+      "type": "string"
     },
     "signer_workflow": {
+      "type": "string"
+    },
+    "release_channel": {
       "type": "string",
-      "pattern": "^atrinik/classic/\\.github/workflows/package-release\\.yml$"
+      "enum": [
+        "stable",
+        "development"
+      ]
+    },
+    "source_ref": {
+      "const": "refs/heads/main"
+    },
+    "discovery_tag": {
+      "const": "development"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "release_image": {
+            "const": "ghcr.io/atrinik/classic-server"
+          },
+          "signer_workflow": {
+            "const": "atrinik/classic/.github/workflows/package-release.yml"
+          },
+          "release_channel": false,
+          "source_ref": false,
+          "discovery_tag": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "release_channel"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "release_channel": {
+            "const": "development"
+          }
+        },
+        "required": [
+          "release_channel"
+        ]
+      },
+      "then": {
+        "required": [
+          "source_ref",
+          "discovery_tag"
+        ],
+        "properties": {
+          "release_image": {
+            "const": "ghcr.io/atrinik/classic-server"
+          },
+          "signer_workflow": {
+            "const": "atrinik/classic/.github/workflows/publish-development-server.yml"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "release_image": {
+            "const": "ghcr.io/atrinik/classic-server"
+          },
+          "signer_workflow": {
+            "const": "atrinik/classic/.github/workflows/package-release.yml"
+          },
+          "source_ref": false,
+          "discovery_tag": false
+        }
+      }
+    }
+  ]
 }

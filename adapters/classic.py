@@ -50,6 +50,10 @@ VERIFIER_IMAGE = ''
 CONFIG_PATH = None
 INSTALLATION_ROOT = Path('/opt/service-updater')
 SIGNER_WORKFLOW = REPO + '/.github/workflows/package-release.yml'
+RELEASE_CHANNEL = 'stable'
+SOURCE_REF = DISCOVERY_TAG = None
+DEVELOPMENT_IMAGE = 'ghcr.io/atrinik/classic-server'
+DEVELOPMENT_WORKFLOW = 'atrinik/classic/.github/workflows/publish-development-server.yml'
 HEX = core.HEX
 Rejected = core.Rejected
 need = core.need
@@ -94,12 +98,26 @@ CONFIG_PATTERNS = {
 
 
 def validate_deployment(data):
-    need(type(data) is dict and set(data) == set(CONFIG_FIELDS) | {'schema_version'}, 'deployment config fields missing or unknown')
-    need(type(data['schema_version']) is int and data['schema_version'] == 1, 'unsupported deployment config schema')
-    values = {}
+    need(type(data) is dict and type(data.get('schema_version')) is int and
+         data['schema_version'] in (1, 2), 'unsupported deployment config schema')
+    channel = data.get('release_channel', 'stable')
+    extra = {'schema_version'}
+    if data['schema_version'] == 2:
+        extra.add('release_channel')
+        need(channel in ('stable', 'development'), 'invalid release channel')
+        if channel == 'development':
+            extra.update(('source_ref', 'discovery_tag'))
+            need(data.get('source_ref') == 'refs/heads/main' and data.get('discovery_tag') == 'development',
+                 'invalid development discovery tuple')
+    need(set(data) == set(CONFIG_FIELDS) | extra, 'deployment config fields missing or unknown')
+    patterns = dict(CONFIG_PATTERNS)
+    if channel == 'development':
+        patterns.update(release_image=re.escape(DEVELOPMENT_IMAGE), workflow=re.escape(DEVELOPMENT_WORKFLOW))
+    values = {'RELEASE_CHANNEL': channel, 'SOURCE_REF': data.get('source_ref'),
+              'DISCOVERY_TAG': data.get('discovery_tag')}
     for key, (name, kind) in CONFIG_FIELDS.items():
         value = data[key]
-        need(isinstance(value, str) and re.fullmatch(CONFIG_PATTERNS[kind], value), 'invalid deployment config: ' + key)
+        need(isinstance(value, str) and re.fullmatch(patterns[kind], value), 'invalid deployment config: ' + key)
         if kind == 'path':
             path = Path(value)
             need(str(path) == value and '..' not in path.parts and len(path.parts) >= 3, 'unsafe deployment path: ' + key)
@@ -211,6 +229,8 @@ def fence(require_pin=True):
         current_pin = validate_pin(load(ROOT / 'pin.json'))
         ledger = load(ROOT / 'ledger.json')
         need(type(ledger.get('accepted')) is list and ledger['accepted'] and ledger['accepted'][-1] == current_pin, 'pin and accepted ledger disagree')
+        for accepted in ledger['accepted']:
+            validate_pin(accepted)
         inspect_image(current_pin)
         validate_access(expected_identity, pin=current_pin)
 
@@ -360,6 +380,8 @@ def check_monotonic(candidate, ledger):
 
 
 def source():
+    if RELEASE_CHANNEL == 'development':
+        return core.DevelopmentSource(REPO, IMAGE, SIGNER_WORKFLOW, SOURCE_REF, DISCOVERY_TAG)
     return core.ReleaseSource(REPO, IMAGE, SIGNER_WORKFLOW)
 
 
@@ -374,11 +396,13 @@ def manifest(reference):
 amd64_child = core.amd64_child
 
 
-def verifier_args(directory, revision, workflow=SIGNER_WORKFLOW):
-    return core.verifier_args(directory, revision, VERIFIER_IMAGE, REPO, workflow)
+def verifier_args(directory, revision, workflow=None):
+    workflow = SIGNER_WORKFLOW if workflow is None else workflow
+    return core.verifier_args(directory, revision, VERIFIER_IMAGE, REPO, workflow,
+                              SOURCE_REF if RELEASE_CHANNEL == 'development' else None)
 
 
-def verify_index(raw, revision, workflow=SIGNER_WORKFLOW):
+def verify_index(raw, revision, workflow=None):
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
     attestations = api('/attestations/' + digest + '?per_page=30').get('attestations')
     return core.verify_index(raw, revision, attestations,
@@ -400,6 +424,8 @@ def activate(candidate, lock=None):
 
 
 def stage():
+    if RELEASE_CHANNEL == 'development':
+        return stage_development()
     release = api('/releases/latest')
     tag = validate_release(release)
     commit = api('/git/ref/tags/' + tag)['object']
@@ -431,6 +457,34 @@ def stage():
     atomic(ROOT / 'staged.json', candidate)
     return candidate
 
+def stage_development():
+    publication = source()
+    index_digest, raw = publication.manifest(DISCOVERY_TAG)
+    child_digest = amd64_child(raw)
+    _, child = publication.manifest(child_digest)
+    config_digest = json.loads(child).get('config', {}).get('digest')
+    need(isinstance(config_digest, str) and re.fullmatch('sha256:' + HEX, config_digest),
+         'invalid child config digest')
+    image = IMAGE + '@' + child_digest
+    command('docker', 'pull', '--platform', 'linux/amd64', image, timeout=900)
+    pulled = json.loads(command('docker', 'image', 'inspect', image))[0]
+    need(image in pulled.get('RepoDigests', []), 'pulled digest mismatch')
+    candidate = {'release_channel': 'development', 'version': '0.0.0',
+                 'revision': (pulled['Config'].get('Labels') or {}).get('org.opencontainers.image.revision', ''),
+                 'image': image, 'index_image': IMAGE + '@' + index_digest,
+                 'config_digest': config_digest, 'image_id': pulled['Id']}
+    check_monotonic(candidate, load(ROOT / 'ledger.json'))
+    inspect_image(candidate)
+    verify_provenance(candidate)
+    publication.check_discovery(candidate)
+    accepted_compatibility(candidate)
+    # Never execute candidate bytes before provenance, ordering and discovery
+    # checks have all completed. Initial acceptance is operator-owned.
+    image_capability(candidate)
+    atomic(ROOT / 'staged.json', candidate)
+    return candidate
+
+
 def verify_provenance(pin):
     validate_pin(pin)
     _, raw = manifest(pin['index_image'].split('@', 1)[1])
@@ -443,7 +497,8 @@ def verify_provenance(pin):
 def accepted_compatibility(pin):
     acceptance = load(ROOT / 'acceptance.json')
     need(acceptance.get('private_map_roundtrip') is True and type(acceptance.get('private_map_count')) is int and acceptance['private_map_count'] >= 5, 'actual private-map roundtrip acceptance required')
-    need(version(pin['version']) >= version(acceptance['minimum_version']), 'release predates accepted private-map fix')
+    if RELEASE_CHANNEL == 'stable':
+        need(version(pin['version']) >= version(acceptance['minimum_version']), 'release predates accepted private-map fix')
     revision = acceptance['source_revision']
     need(re.fullmatch(r'[0-9a-f]{40}', revision), 'invalid accepted source revision')
     if revision != pin['revision']:
@@ -465,6 +520,8 @@ def inspect_image(pin):
     need(obj['Architecture'] == 'amd64' and obj['Os'] == 'linux', 'wrong image platform')
     need(obj['Id'] == pin['image_id'], 'image content hash mismatch')
     labels = obj['Config'].get('Labels') or {}
+    if RELEASE_CHANNEL == 'development':
+        need(labels.get('org.atrinik.release-channel') == 'development', 'OCI channel mismatch')
     for name, value in {'revision': pin['revision'], 'version': pin['version'], 'source': 'https://github.com/' + REPO}.items():
         need(labels.get('org.opencontainers.image.' + name) == value, 'OCI release provenance mismatch')
 

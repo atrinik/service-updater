@@ -3,7 +3,26 @@
 The Classic adapter uses official `atrinik/classic` releases,
 `ghcr.io/atrinik/classic-server`, and the signer workflow
 `atrinik/classic/.github/workflows/package-release.yml`. These are checked by its
-strict schema. Runtime containers must be Linux/amd64. Docker containerd
+strict schema. Schema 1 retains this stable behavior. Schema 2 requires an
+explicit `release_channel`, either `stable` (the same tuple) or `development`.
+The development tuple is exactly:
+
+- `release_repository`: `atrinik/classic`
+- `release_image`: `ghcr.io/atrinik/classic-server`
+- `signer_workflow`: `atrinik/classic/.github/workflows/publish-development-server.yml`
+- `source_ref`: `refs/heads/main`
+- `discovery_tag`: `development`
+
+The last two fields are required only for development and forbidden for stable.
+See [the development example](../config/deployment-development.example.json).
+A development index is discovered by its alias and must match the immutable
+`source-<40-digit-revision>` tag. Only a hosted GitHub Actions SLSA v1 attestation
+from that exact workflow and main source ref is accepted. The OCI version must
+be `0.0.0`, with `org.atrinik.release-channel=development`; release metadata and
+semantic versions are not invented. Restarts verify the retained index digest,
+child, config and source provenance without consulting either discovery tag.
+
+Runtime containers must be Linux/amd64. Docker containerd
 manifest descriptors must match the selected child; an index-backed runtime
 without a child descriptor is rejected, while legacy config-backed runtimes
 remain supported. Other service sources belong to other reviewed adapters.
@@ -93,20 +112,34 @@ The configured root holds these root-owned mode-0600 records:
 - `pin.json`: stable version, immutable child `image`, attested `index_image`,
   OCI `config_digest`, engine `image_id` bound to index/child/config, 40-digit source `revision` and positive
   numeric GitHub `release_id`.
+  Development pins instead have exactly `release_channel: development`,
+  `version: 0.0.0`, `revision`, `image`, `index_image`, `config_digest`, and
+  `image_id`; `release_id` is forbidden.
 - `ledger.json`: `accepted`, an ordered list of complete pin records ending at
-  the current pin; changed/downgraded accepted releases are rejected.
+  the current pin; changed/downgraded accepted releases are rejected. Development
+  compares full source ancestry against every accepted entry, rejects divergent
+  or older history, and requires complete pin equality for a reused revision.
+  All records must belong to the configured channel and image. Changing config
+  cannot silently convert an existing stable acceptance ledger.
 - `identity.json`: `sha256`, the development certificate DER fingerprint.
 - `acceptance.json`: `private_map_roundtrip: true`, `private_map_count` of at
   least five, accepted `minimum_version`, and 40-digit `source_revision`.
   Create only after real restored-map load/save/logout/relogin acceptance.
   Later release revisions must descend from that accepted source revision.
+  Development still requires the actual map evidence and source ancestry;
+  `minimum_version` applies only to stable releases.
 - `policy.json`: `activation_enabled`, initially false. Only Boolean true enables
   update activation; strings/numbers do not.
 
 Use `service_updater.py --config ABSOLUTE_CONFIG ACTION`. Actions are `check`,
 `stage`, `update`, `run`, `stop` and `close`. All update/runtime mutations use one
 configured flock. Deployment owns services and timer and leaves them stopped
-and disabled until acceptance. The controller never seeds a private cohort.
+and disabled until acceptance. The controller never seeds a private cohort. An initial development-channel deployment
+requires deployment-owned proof that no stable pin was previously activated,
+then a verified development pin and matching initial `accepted: [pin]` ledger.
+An empty ledger can be used by an offline discovery harness, but never passes
+runtime fencing. Existing activated installations require an explicit reviewed
+migration; this controller neither erases old acceptance nor migrates channels.
 
 Before a live update, the adapter authenticates native Unix socket peer PID/UID,
 requires countdown and durable-result capabilities, requests a 60-second player
