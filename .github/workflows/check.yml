@@ -1,0 +1,95 @@
+name: Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python }} tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit and release recovery tests
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m unittest discover -s .github/release -p 'test_*.py' -v
+      - name: Build the source package fixture
+        run: python3 scripts/package.py 0.0.0
+      - name: Check release JavaScript syntax
+        run: |
+          node --check .github/release/plugin.mjs
+          node --check .github/release/plan.mjs
+          node --check .github/release/run.mjs
+  container:
+    name: Public provenance smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Build the local verifier fixture
+        id: image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          push: false
+          tags: service-updater-ci:fixture
+      - name: Verify public provenance and reject negative cases without credentials
+        env:
+          LOCAL_IMAGE: ${{ steps.image.outputs.imageid }}
+        run: python3 scripts/smoke_public.py "${LOCAL_IMAGE}" --local-image
+  release-contract:
+    name: Release engine contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node .github/release/test_semantic.mjs
+  validation:
+    name: Updater validation
+    if: always()
+    needs: [tests, container, release-contract]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require all validation jobs
+        env:
+          RELEASE_RESULT: ${{ needs.release-contract.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
+        run: |
+          test "${RELEASE_RESULT}" = success
+          test "${TESTS_RESULT}" = success
+          test "${CONTAINER_RESULT}" = success

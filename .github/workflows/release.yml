@@ -1,0 +1,151 @@
+name: Semantic Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-updater-release-publication
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Semantic release
+    if: github.repository == 'atrinik/service-updater' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      checks: read
+      contents: write
+      packages: write
+      attestations: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Require the validated current main commit
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "${RELEASE_SHA}"
+          for attempt in {1..30}; do
+            state=$(gh api "repos/${RELEASE_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "Updater validation" and .app.id == 15368)] | sort_by(.id) | .[-1] |
+                if . == null or .status != "completed" then "pending"
+                elif .conclusion == "success" then "success"
+                else "failure" end')
+            case "${state}" in
+              success) break ;;
+              failure) echo 'Updater validation failed' >&2; exit 1 ;;
+              pending) test "${attempt}" -lt 30 || exit 1; sleep 20 ;;
+              *) exit 1 ;;
+            esac
+          done
+      - name: Install the locked release tools
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Plan the semantic version or resume its prepared draft
+        id: plan
+        run: npm run release:plan
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        if: steps.plan.outputs.version != ''
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        if: steps.plan.outputs.version != ''
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Reuse an existing exact version image
+        id: registry
+        if: steps.plan.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: python3 .github/release/state.py image
+      - name: Package the semantic version
+        if: steps.plan.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: python3 scripts/package.py "${RELEASE_VERSION}"
+      - name: Build and publish the version image only when absent
+        id: image
+        if: steps.plan.outputs.version != '' && steps.registry.outputs.digest == ''
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          platforms: linux/amd64
+          provenance: mode=max
+          sbom: true
+          push: true
+          tags: ghcr.io/atrinik/service-updater:${{ steps.plan.outputs.version }}
+          labels: |
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/atrinik/service-updater
+            org.opencontainers.image.title=Atrinik Service Updater
+            org.opencontainers.image.version=${{ steps.plan.outputs.version }}
+      - name: Attest the exact image index
+        if: steps.plan.outputs.version != '' && steps.registry.outputs.digest == ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ghcr.io/atrinik/service-updater
+          subject-digest: ${{ steps.image.outputs.digest || steps.registry.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Pull the exact image for the isolated verifier
+        if: steps.plan.outputs.version != ''
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest || steps.registry.outputs.digest }}
+        run: docker pull "ghcr.io/atrinik/service-updater@${IMAGE_DIGEST}"
+      - name: Verify the published verifier against public positive and negative fixtures
+        if: steps.plan.outputs.version != ''
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest || steps.registry.outputs.digest }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: python3 scripts/smoke_public.py "ghcr.io/atrinik/service-updater@${IMAGE_DIGEST}"
+      - name: Attest the exact source archive
+        if: steps.plan.outputs.version != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/atrinik-service-updater-${{ steps.plan.outputs.version }}.tar.gz
+      - name: Verify both attestations and write the immutable candidate manifest
+        if: steps.plan.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest || steps.registry.outputs.digest }}
+        run: |
+          gh attestation verify "oci://ghcr.io/atrinik/service-updater@${IMAGE_DIGEST}" \
+            --repo atrinik/service-updater --signer-workflow atrinik/service-updater/.github/workflows/release.yml \
+            --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
+          gh attestation verify "dist/atrinik-service-updater-${RELEASE_VERSION}.tar.gz" \
+            --repo atrinik/service-updater --signer-workflow atrinik/service-updater/.github/workflows/release.yml \
+            --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
+          python3 .github/release/state.py manifest
+      - name: Retain the complete candidate before Git tagging
+        if: steps.plan.outputs.version != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: service-updater-release-candidate
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Prepare complete draft, create semantic tag, then publish
+        if: steps.plan.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_RECOVERY: ${{ steps.plan.outputs.recovery }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest || steps.registry.outputs.digest }}
+        run: npm run release

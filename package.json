@@ -1,0 +1,19 @@
+{
+  "name": "@atrinik/service-updater-release",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {"node": "^22.14.0 || >=24.10.0"},
+  "scripts": {
+    "release:plan": "node .github/release/plan.mjs",
+    "release": "node .github/release/run.mjs",
+    "test:release": "python3 -m unittest discover -s .github/release -p 'test_*.py' -v"
+  },
+  "devDependencies": {
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/release-notes-generator": "14.1.1",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "semantic-release": "25.0.9"
+  }
+}

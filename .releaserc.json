@@ -1,0 +1,10 @@
+{
+  "branches": ["main"],
+  "repositoryUrl": "https://github.com/atrinik/service-updater.git",
+  "tagFormat": "v${version}",
+  "plugins": [
+    ["@semantic-release/commit-analyzer", {"preset": "conventionalcommits"}],
+    ["@semantic-release/release-notes-generator", {"preset": "conventionalcommits"}],
+    "./.github/release/plugin.mjs"
+  ]
+}
