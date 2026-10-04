@@ -112,7 +112,7 @@ class Safety(unittest.TestCase):
                 config.write_text(text)
                 with self.assertRaises(d.Rejected):
                     d.validate_config(config)
-            config.write_text('[meta]\naccess_required=true\nmetaserver_hostname=\n')
+            config.write_text('[meta]\naccess_required=true\n')
             d.validate_config(config)
 
     def test_protected_save_fingerprints_detect_modification_and_loss(self):

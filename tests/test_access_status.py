@@ -136,7 +136,7 @@ class PolicyAndExecution(unittest.TestCase):
                 path.write_text(value)
                 with self.subTest(value=value), self.assertRaises(d.Rejected):
                     d.validate_config(path)
-            path.write_text('[meta]\naccess_required="true"\naccess_store=/opt/atrinik/server/data/access-tokens\naccess_admin_accounts=/opt/atrinik/server/access-admin-accounts\n')
+            path.write_text('[meta]\naccess_required=true\naccess_store=/opt/atrinik/server/data/access-tokens\naccess_admin_accounts=/opt/atrinik/server/access-admin-accounts\n')
             self.assertEqual(d.validate_config(path), {'policy': 'protected', 'allowlist': True})
 
     def test_missing_store_and_dangling_symlinks_never_become_valid_protected_or_open(self):

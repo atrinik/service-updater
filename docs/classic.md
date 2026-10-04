@@ -38,6 +38,19 @@ and `rendezvous_invite_file` settings, and the old invitation file, are rejected
 transition requires explicit offline migration before this adapter can run.
 Account authentication and player saves are separate and remain unchanged.
 
+Configuration uses a conservative subset of the native line-oriented grammar,
+not INI parsing. Use unique lowercase `[section]` labels and globally unique
+lowercase `name=value` assignments, with nonempty arguments. Controlled access
+and endpoint options belong only in `[meta]` and must be unquoted. Spaces or tabs
+around `=` and LF/CRLF line endings are supported; active-line indentation,
+continuations, uppercase keys, colon assignments, duplicate sections/options,
+option abbreviations, recursive `config` directives, file indirection, escapes
+and control characters are rejected. Comments begin with `#` at column one.
+Omit optional unset settings rather than supplying blank values. Files are
+bounded to 1 MiB, physical lines to 4094 UTF-8 bytes, and normalized `name=value`
+to 4093 bytes so the native 4096-byte input/argument buffers cannot truncate an
+accepted option. Unsupported forms fail before native status execution.
+
 The canonical token directory is `server-data/access-tokens`, owned by UID/GID
 10001 with mode 0700. Its sole mode-0600 file, `access-tokens.snapshot`, contains
 all grants, audit history, removal tombstones, mutation receipts, route outbox

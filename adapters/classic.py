@@ -6,7 +6,6 @@ countdown control and legacy private-map save support. Never substitute
 SIGTERM for an unavailable live-server warning channel.
 """
 import argparse
-import configparser
 import contextlib
 import datetime
 import fcntl
@@ -215,29 +214,74 @@ def fence(require_pin=True):
         inspect_image(current_pin)
         validate_access(expected_identity, pin=current_pin)
 
+def native_config(path):
+    """Accept an unambiguous subset of native line-oriented CLI configuration.
+
+    Native sections do not scope startup options, long options accept prefixes,
+    and config/file-indirection arguments have effects outside this file. Do not
+    interpret this format as INI or reproduce those unsafe extension mechanisms.
+    """
+    controlled = {'access_required', 'access_initialize', 'access_store',
+                  'access_admin_accounts', 'join_password', 'join_password_file',
+                  'rendezvous_invite_file', 'metaserver_hostname', 'server_desc'}
+    raw = path.read_bytes()
+    need(len(raw) <= 1024 * 1024, 'oversize native configuration')
+    values = {}
+    section = None
+    sections = set()
+    lines = raw.split(b'\n')
+    for number, physical in enumerate(lines):
+        # The native fgets buffer is 4096 bytes. A longer comment can itself
+        # split into an active directive, so bound lines before ignoring them.
+        need(len(physical) <= 4094, 'oversize native configuration line')
+        if physical.endswith(b'\r') and number < len(lines) - 1:
+            physical = physical[:-1]
+        try:
+            line = physical.decode('utf-8')
+        except UnicodeError:
+            raise Rejected('invalid native configuration encoding') from None
+        need(not any((ord(char) < 32 and char != '\t') or ord(char) == 127 for char in line) and
+             '\ufeff' not in line and '\\' not in line and '<' not in line,
+             'native configuration controls or indirection forbidden')
+        if not line.strip(' \t'):
+            continue
+        need(not line.startswith((' ', '\t')), 'indented native configuration forbidden')
+        if line.startswith('#'):
+            continue
+        if re.fullmatch(r'\[[a-z][a-z0-9_]*\]', line):
+            section = line[1:-1]
+            need(section not in sections, 'duplicate native configuration section')
+            sections.add(section)
+            continue
+        name, separator, value = line.partition('=')
+        name, value = name.strip(' \t'), value.strip(' \t')
+        need(section is not None and separator == '=' and re.fullmatch(r'[a-z][a-z0-9_]*', name) and
+             value != '', 'unsupported native configuration assignment')
+        # snprintf adds "--" to key=value inside another 4096-byte buffer.
+        need(len((name + '=' + value).encode('utf-8')) <= 4093,
+             'native configuration assignment would truncate')
+        need(name not in values, 'duplicate native configuration option')
+        need(name != 'config' and not any(option.startswith(name) and option != name
+             for option in controlled | {'config'}), 'native configuration include or alias forbidden')
+        if name in controlled:
+            need(section == 'meta' and '"' not in value and "'" not in value,
+                 'controlled native option requires unquoted meta assignment')
+        values[name] = value
+    return values
+
+
 def validate_config(path):
-    config = configparser.ConfigParser(interpolation=None, strict=True)
-    config.read_string(path.read_text())
-    meta = config['meta']
-    def setting(name, default=None):
-        value = meta.get(name, default)
-        if value is None:
-            return None
-        value = value.strip()
-        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-            value = value[1:-1]
-        need('"' not in value and '\n' not in value, 'invalid access configuration value')
-        return value
-    need(not any(name in meta for name in ('join_password', 'join_password_file', 'rendezvous_invite_file')),
+    values = native_config(path)
+    need(not any(name in values for name in ('join_password', 'join_password_file', 'rendezvous_invite_file')),
          'legacy access configuration requires explicit offline migration')
-    required = setting('access_required')
+    required = values.get('access_required')
     need(required in ('true', 'false'), 'explicit access_required=true|false policy required')
-    need(setting('access_initialize', 'false') == 'false', 'updater cannot initialize access state')
-    need(setting('access_store') in (None, '/opt/atrinik/server/data/access-tokens'), 'external access store forbidden')
-    allowlist = setting('access_admin_accounts')
+    need(values.get('access_initialize', 'false') == 'false', 'updater cannot initialize access state')
+    need(values.get('access_store') in (None, '/opt/atrinik/server/data/access-tokens'), 'external access store forbidden')
+    allowlist = values.get('access_admin_accounts')
     need(allowlist in (None, '/opt/atrinik/server/access-admin-accounts'), 'external access allowlist forbidden')
-    need(not setting('metaserver_hostname', ''), 'direct endpoint publication forbidden')
-    need(PRODUCTION_ENDPOINT not in meta.get('server_desc', ''), 'production direct address forbidden')
+    need('metaserver_hostname' not in values, 'direct endpoint publication forbidden')
+    need(PRODUCTION_ENDPOINT not in values.get('server_desc', ''), 'production direct address forbidden')
     return {'policy': 'protected' if required == 'true' else 'open', 'allowlist': allowlist is not None}
 
 
