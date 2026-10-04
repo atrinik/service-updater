@@ -89,6 +89,6 @@ published release supporting the countdown/save interface and actual private-map
 acceptance.
 
 Releases are published by the reviewed semantic-release workflow; see
-[release lifecycle](.github/release/README.md). Do not create
+[release lifecycle](https://github.com/atrinik/service-updater/blob/main/.github/release/README.md). Do not create
 version tags, images or release assets by hand. This project uses the
 [MIT license](LICENSE). Server binaries and data are not distributed here.
