@@ -60,12 +60,13 @@ and commit state. Omit `access_store` or use the container path
 `access_initialize` must be absent or `false`: the updater never bootstraps,
 issues, renews, revokes or removes a credential.
 
-In-game token administrators may be configured through
-`access_admin_accounts=/opt/atrinik/server/access-admin-accounts`. This maps to
-`config/access-admin-accounts` in the cohort, owned by root with group 10001 and
-mode 0440 or 0640, and mounted read-only. Omit the setting when no allowlist is
-configured; an empty allowlist file grants nobody access. Do not grant authority
-through inherited player groups. Optional path settings cannot be blank.
+In-game `/access` administration uses the existing per-character
+`/cmd_permission` system and automatic `[OP]` authority. The updater does not
+configure account grants. Obsolete `access_admin_accounts` settings and
+`config/access-admin-accounts` files, including dangling symlinks, are rejected
+and require explicit offline migration. Root Unix-socket bootstrap, status,
+warning and durable-save operations retain their authenticated peer checks.
+Optional path settings cannot be blank.
 
 Store health comes from the native `access-tokens-v1` status contract. Running
 services answer an authenticated root Unix-socket request with a bounded,
@@ -117,13 +118,14 @@ Unknown well-formed capabilities are tolerated; `shutdown-v1` and
 `access-tokens-v1`. The native save result must cover token/audit/outbox state
 as well as game saves.
 There is no live SIGTERM/SIGKILL fallback. After shutdown it closes ingress,
-archives the complete state/config/records and old image, verifies the archives,
+archives the complete state/config/records, including saved per-character
+command permissions, and old image, verifies the archives,
 and fsyncs files/directories before recording a manifest.
 
 An isolated clone runs without network and must shut down through the same
 checked save interface. Account/player/private-map file sets and byte hashes
 must remain unchanged in this idle check; quarantine is rejected. The complete
-authorization snapshot, allowlist, configuration and certificate are fingerprinted
+token authorization snapshot, configuration and certificate are fingerprinted
 in the backup manifest and must also remain unchanged in the isolated clone.
 No clone publishes routes, admits a real player or supplies an operator code. The live
 candidate starts behind closed ingress, then must pass runtime mounts, identity,

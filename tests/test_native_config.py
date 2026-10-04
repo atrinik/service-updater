@@ -15,10 +15,18 @@ class NativeConfiguration(unittest.TestCase):
             return d.validate_config(path)
 
     def test_native_standalone_assignments_and_optional_paths_remain_supported(self):
-        text = '# Configured values\n[general]\nserver_name = "Synthetic Server"\n[meta]\naccess_required = true\naccess_initialize = false\naccess_store = /opt/atrinik/server/data/access-tokens\naccess_admin_accounts = /opt/atrinik/server/access-admin-accounts\nserver_desc = A synthetic server\n'
+        text = '# Configured values\n[general]\nserver_name = "Synthetic Server"\n[meta]\naccess_required = true\naccess_initialize = false\naccess_store = /opt/atrinik/server/data/access-tokens\nserver_desc = A synthetic server\n'
         for raw in (text, text.replace('\n', '\r\n'), text.rstrip('\n'), text.replace(' = ', '\t=\t')):
-            self.assertEqual(self.parse(raw), {'policy': 'protected', 'allowlist': True})
-        self.assertEqual(self.parse('[meta]\naccess_required=false\n'), {'policy': 'open', 'allowlist': False})
+            self.assertEqual(self.parse(raw), {'policy': 'protected'})
+        self.assertEqual(self.parse('[meta]\naccess_required=false\n'), {'policy': 'open'})
+
+    def test_obsolete_account_option_is_rejected_in_every_section(self):
+        for section in ('meta', 'general'):
+            for value in ('/opt/atrinik/server/access-admin-accounts', '/external', 'fixture'):
+                with self.subTest(section=section, value=value), self.assertRaisesRegex(d.Rejected, 'obsolete'):
+                    self.parse('[meta]\naccess_required=true\n' +
+                               ('[general]\n' if section == 'general' else '') +
+                               'access_admin_accounts=' + value + '\n')
 
     def test_indented_native_override_is_not_an_ini_continuation(self):
         for whitespace in (' ', '\t', '    '):

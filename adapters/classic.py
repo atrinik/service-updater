@@ -263,6 +263,8 @@ def native_config(path):
         need(name not in values, 'duplicate native configuration option')
         need(name != 'config' and not any(option.startswith(name) and option != name
              for option in controlled | {'config'}), 'native configuration include or alias forbidden')
+        need(name != 'access_admin_accounts',
+             'obsolete access administrator configuration requires explicit offline migration')
         if name in controlled:
             need(section == 'meta' and '"' not in value and "'" not in value,
                  'controlled native option requires unquoted meta assignment')
@@ -278,19 +280,16 @@ def validate_config(path):
     need(required in ('true', 'false'), 'explicit access_required=true|false policy required')
     need(values.get('access_initialize', 'false') == 'false', 'updater cannot initialize access state')
     need(values.get('access_store') in (None, '/opt/atrinik/server/data/access-tokens'), 'external access store forbidden')
-    allowlist = values.get('access_admin_accounts')
-    need(allowlist in (None, '/opt/atrinik/server/access-admin-accounts'), 'external access allowlist forbidden')
     need('metaserver_hostname' not in values, 'direct endpoint publication forbidden')
     need(PRODUCTION_ENDPOINT not in values.get('server_desc', ''), 'production direct address forbidden')
-    return {'policy': 'protected' if required == 'true' else 'open', 'allowlist': allowlist is not None}
+    return {'policy': 'protected' if required == 'true' else 'open'}
 
 
 def access_paths(state):
     policy = validate_config(state / 'config/server-custom.cfg')
-    allowlist = state / 'config/access-admin-accounts'
-    need(not allowlist.is_symlink(), 'access allowlist symlink forbidden')
-    if policy['allowlist'] or allowlist.exists():
-        private(allowlist, 0, 10001, (0o440, 0o640))
+    obsolete = state / 'config/access-admin-accounts'
+    need(not obsolete.exists() and not obsolete.is_symlink(),
+         'obsolete access administrator file requires explicit offline migration')
     store = state / 'server-data/access-tokens'
     need(not store.is_symlink(), 'access store symlink forbidden')
     if store.exists():
@@ -308,9 +307,9 @@ def access_footprint(state):
     private(state / 'config/server-custom.cfg', 0, 10001, (0o440, 0o640))
     private(state / 'server-data/quic-identity.pem', 10001, 10001, (0o600, 0o400))
     paths = ['config/server-custom.cfg', 'server-data/quic-identity.pem']
-    for optional in ('config/access-admin-accounts', 'server-data/access-tokens/access-tokens.snapshot'):
-        if (state / optional).exists():
-            paths.append(optional)
+    snapshot = 'server-data/access-tokens/access-tokens.snapshot'
+    if (state / snapshot).exists():
+        paths.append(snapshot)
     return {name: file_hash(state / name) for name in paths}
 
 
@@ -484,9 +483,6 @@ def container_args(name, state, pin, isolated, admin_root=None):
             '--env', 'ATRINIK_SERVER_PUBLIC=' + ('false' if isolated else 'true'),
             '--health-cmd', '/usr/local/bin/atrinik-server-healthcheck', '--health-interval', '10s',
             '--health-timeout', '5s', '--health-retries', '3', '--health-start-period', '20s']
-    allowlist = state / 'config/access-admin-accounts'
-    if allowlist.exists():
-        args += ['--mount', 'type=bind,src=' + str(allowlist) + ',dst=/opt/atrinik/server/access-admin-accounts,readonly']
     if not isolated or admin_root:
         args += ['--mount', f'type=bind,src={admin_root or ADMIN.parent},dst={ADMIN.parent}',
                  '--env', 'ATRINIK_ADMIN_SHUTDOWN_SOCKET=' + str(ADMIN)]
@@ -798,9 +794,6 @@ def validate_runtime(obj, pin):
     expected_mounts = {'/opt/atrinik/server/data': (str(STATE / 'server-data'), True),
                        '/opt/atrinik/server/server-custom.cfg': (str(STATE / 'config/server-custom.cfg'), False),
                        str(ADMIN.parent): (str(ADMIN.parent), True)}
-    allowlist = STATE / 'config/access-admin-accounts'
-    if allowlist.exists():
-        expected_mounts['/opt/atrinik/server/access-admin-accounts'] = (str(allowlist), False)
     need(mounts == expected_mounts, 'runtime cohort mount mismatch')
 
 

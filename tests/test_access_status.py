@@ -130,14 +130,15 @@ class PolicyAndExecution(unittest.TestCase):
                    '[meta]\naccess_required=true\naccess_initialize=true\n']
             for option in ('join_password=', 'join_password_file=', 'rendezvous_invite_file=',
                            'access_store=', 'access_store=/external', 'access_admin_accounts=',
-                           'access_admin_accounts=/external'):
+                           'access_admin_accounts=/external',
+                           'access_admin_accounts=/opt/atrinik/server/access-admin-accounts'):
                 bad.append('[meta]\naccess_required=true\n' + option + '\n')
             for value in bad:
                 path.write_text(value)
                 with self.subTest(value=value), self.assertRaises(d.Rejected):
                     d.validate_config(path)
-            path.write_text('[meta]\naccess_required=true\naccess_store=/opt/atrinik/server/data/access-tokens\naccess_admin_accounts=/opt/atrinik/server/access-admin-accounts\n')
-            self.assertEqual(d.validate_config(path), {'policy': 'protected', 'allowlist': True})
+            path.write_text('[meta]\naccess_required=true\naccess_store=/opt/atrinik/server/data/access-tokens\n')
+            self.assertEqual(d.validate_config(path), {'policy': 'protected'})
 
     def test_missing_store_and_dangling_symlinks_never_become_valid_protected_or_open(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(d, 'private'):
@@ -190,13 +191,44 @@ class PolicyAndExecution(unittest.TestCase):
                 self.assertEqual(snapshot.read_bytes(), opaque)
                 inspect.assert_called_once_with(state, {'image_id': 'fixture'}, IDENTITY, 'protected')
 
-    def test_allowlist_readonly_mount_is_part_of_runtime_mount_contract(self):
+    def test_obsolete_account_file_and_dangling_symlink_fail_before_execution(self):
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), tempfile.TemporaryDirectory() as temp, patch.object(d, 'private'):
+                state = fixture(Path(temp))
+                obsolete = state / 'config/access-admin-accounts'
+                if dangling:
+                    obsolete.symlink_to(state / 'missing')
+                else:
+                    obsolete.write_text('')
+                with patch.object(d, 'command') as command, patch.object(d, 'offline_access_status') as inspect, self.assertRaisesRegex(d.Rejected, 'obsolete'):
+                    d.validate_access(IDENTITY, state, {'image_id': 'fixture'}, 'fixture')
+                command.assert_not_called()
+                inspect.assert_not_called()
+
+    def test_runtime_args_never_mount_obsolete_account_file(self):
         with tempfile.TemporaryDirectory() as temp:
             state = fixture(Path(temp))
-            allowlist = state / 'config/access-admin-accounts'
-            allowlist.write_text('')
+            (state / 'config/access-admin-accounts').write_text('')
             args = d.container_args('fixture', state, {'image_id': 'fixture'}, True)
-            self.assertIn('type=bind,src=' + str(allowlist) + ',dst=/opt/atrinik/server/access-admin-accounts,readonly', args)
+            self.assertFalse(any('access-admin-accounts' in arg for arg in args))
+
+    def test_runtime_contract_rejects_obsolete_account_mount(self):
+        pin = {'image_id': 'sha256:' + 'a' * 64,
+               'index_image': 'fixture@sha256:' + 'b' * 64}
+        mounts = [{'Type': 'bind', 'Destination': target, 'Source': source, 'RW': rw}
+                  for target, source, rw in (
+                      ('/opt/atrinik/server/data', str(d.STATE / 'server-data'), True),
+                      ('/opt/atrinik/server/server-custom.cfg', str(d.STATE / 'config/server-custom.cfg'), False),
+                      (str(d.ADMIN.parent), str(d.ADMIN.parent), True))]
+        runtime = {'Platform': 'linux', 'Image': pin['image_id'],
+                   'Config': {'Image': pin['image_id'], 'User': '10001:10001',
+                              'Labels': {'org.atrinik.development.managed': 'true'}},
+                   'HostConfig': {'NetworkMode': 'host'}, 'Mounts': mounts}
+        d.validate_runtime(runtime, pin)
+        mounts.append({'Type': 'bind', 'Destination': '/opt/atrinik/server/access-admin-accounts',
+                       'Source': str(d.STATE / 'config/access-admin-accounts'), 'RW': False})
+        with self.assertRaisesRegex(d.Rejected, 'mount mismatch'):
+            d.validate_runtime(runtime, pin)
 
 
 class AuthorizationPreservation(unittest.TestCase):
@@ -221,6 +253,8 @@ class AuthorizationPreservation(unittest.TestCase):
                 state = fixture(root)
                 for name in ('accounts', 'players', 'unique-items'):
                     (state / 'server-data' / name).mkdir()
+                player = state / 'server-data/players/fixture'
+                player.write_bytes(b'cmd_permission access\n')
                 backup = root / 'backup'
                 backup.mkdir()
                 subprocess.run(['tar', '-cpf', str(backup / 'cohort.tar'), '-C', '/', str(state).lstrip('/')], check=True)
@@ -243,6 +277,7 @@ class AuthorizationPreservation(unittest.TestCase):
                     else:
                         d.clone_check(backup, {'image_id': 'fixture'})
                         self.assertFalse((backup / 'clone').exists())
+                self.assertEqual(player.read_bytes(), b'cmd_permission access\n')
                 self.assertEqual((state / 'server-data/access-tokens/access-tokens.snapshot').read_bytes(), b'opaque token/audit/outbox fixture')
 
 
