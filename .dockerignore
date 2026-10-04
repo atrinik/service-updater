@@ -1,0 +1,14 @@
+**
+!Dockerfile
+!service_updater.py
+!core.py
+!adapters/
+!adapters/**
+!LICENSE
+!README.md
+!config/
+!config/**
+!docs/
+!docs/**
+**/__pycache__/
+**/*.pyc

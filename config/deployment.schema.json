@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/atrinik/service-updater/config/deployment.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "installation_root",
+    "root",
+    "state",
+    "backups",
+    "state_mount",
+    "admin_socket",
+    "lock",
+    "production_marker",
+    "production_fence",
+    "service",
+    "update_service",
+    "update_timer",
+    "production_service",
+    "container",
+    "production_container",
+    "legacy_guard",
+    "state_disk_serial",
+    "machine_id",
+    "state_filesystem_uuid",
+    "production_identity_sha256",
+    "production_endpoint",
+    "updater_image",
+    "adapter",
+    "release_repository",
+    "release_image",
+    "signer_workflow"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "installation_root": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "root": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "state": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "backups": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "state_mount": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "admin_socket": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "lock": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "production_marker": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "production_fence": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9_.\\-/]+$"
+    },
+    "service": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.service$"
+    },
+    "update_service": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.service$"
+    },
+    "update_timer": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.timer$"
+    },
+    "production_service": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.service$"
+    },
+    "container": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    },
+    "production_container": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    },
+    "legacy_guard": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    },
+    "state_disk_serial": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    },
+    "machine_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "state_filesystem_uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+    },
+    "production_identity_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "production_endpoint": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
+    },
+    "updater_image": {
+      "type": "string",
+      "pattern": "^ghcr\\.io/atrinik/service-updater@sha256:[0-9a-f]{64}$"
+    },
+    "adapter": {
+      "type": "string",
+      "pattern": "^classic$"
+    },
+    "release_repository": {
+      "type": "string",
+      "pattern": "^atrinik/classic$"
+    },
+    "release_image": {
+      "type": "string",
+      "pattern": "^ghcr\\.io/atrinik/classic-server$"
+    },
+    "signer_workflow": {
+      "type": "string",
+      "pattern": "^atrinik/classic/\\.github/workflows/package-release\\.yml$"
+    }
+  }
+}
