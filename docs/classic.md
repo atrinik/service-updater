@@ -64,7 +64,10 @@ exclusive lock and validate without startup, initialization, reconciliation,
 networking or writes. Image provenance is checked before executing it.
 
 Both paths require the exact supported status schema, certificate identity,
-configured policy, integrity and durability. An initialized protected store is
+configured policy, integrity and durability. `pendingRouteSync` counts retained
+per-token route work and must be an integer from 0 through 1024; the separate
+32-item dispatch limit does not make a larger durable backlog unhealthy.
+An initialized protected store is
 valid when empty, revoked or fully expired. An absent store is valid only for
 explicit open policy. The updater never reads token expiry or fabricates use
 history. Duplicate or unknown JSON fields, response/request mismatch, malformed

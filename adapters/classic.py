@@ -528,7 +528,7 @@ def validate_access_status(status, expected_identity, policy):
              'unsupported access store status')
         need(status['integrity'] == 'ok' and status['durability'] == 'ok', 'access store is not durably valid')
         access_revision(status['revision'])
-        need(type(status['pendingRouteSync']) is int and 0 <= status['pendingRouteSync'] <= 32,
+        need(type(status['pendingRouteSync']) is int and 0 <= status['pendingRouteSync'] <= 1024,
              'invalid pending access route count')
     return status
 

@@ -53,7 +53,7 @@ class StatusValidation(unittest.TestCase):
     def test_initialized_zero_revision_and_pending_routes_are_healthy(self):
         for policy in ('open', 'protected'):
             for revision in ('0', str(2**64 - 1)):
-                for pending in (0, 32):
+                for pending in (0, 32, 33, 1024):
                     value = status(policy, revision=revision, pendingRouteSync=pending)
                     self.assertEqual(d.validate_access_status(value, IDENTITY, policy), value)
 
@@ -70,7 +70,7 @@ class StatusValidation(unittest.TestCase):
             'serverIdentity': ['b' * 64, None], 'policy': ['open', None],
             'integrity': ['failed', None], 'durability': ['indeterminate', None],
             'revision': [0, True, '', '00', '+1', '-1', '1.0', str(2**64)],
-            'pendingRouteSync': [-1, 33, True, 1.0, '0']}.items() for value in values]
+            'pendingRouteSync': [-1, 1025, True, 1.0, '0']}.items() for value in values]
         bad += [dict(status(), extra='unexpected')]
         for key in status():
             value = status()
@@ -100,7 +100,9 @@ class StatusValidation(unittest.TestCase):
             return result
 
     def test_framed_live_status_binds_both_initialized_and_absent_open(self):
-        self.assertEqual(self.exchange(frame(envelope(status()))), status())
+        for pending in (0, 33, 1024):
+            value = status(pendingRouteSync=pending)
+            self.assertEqual(self.exchange(frame(envelope(value))), value)
         self.assertEqual(self.exchange(frame(envelope(absent())), 'open'), absent())
 
     def test_online_header_body_and_envelope_ambiguity_rejected(self):
