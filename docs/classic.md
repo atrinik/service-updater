@@ -44,7 +44,8 @@ lowercase `name=value` assignments, with nonempty arguments. Controlled access
 and endpoint options belong only in `[meta]` and must be unquoted. Spaces or tabs
 around `=` and LF/CRLF line endings are supported; active-line indentation,
 continuations, uppercase keys, colon assignments, duplicate sections/options,
-option abbreviations, recursive `config` directives, file indirection, escapes
+abbreviations of controlled options or `config`, recursive `config` directives,
+file indirection, escapes
 and control characters are rejected. Comments begin with `#` at column one.
 Omit optional unset settings rather than supplying blank values. Files are
 bounded to 1 MiB, physical lines to 4094 UTF-8 bytes, and normalized `name=value`
