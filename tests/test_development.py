@@ -108,11 +108,11 @@ class Safety(unittest.TestCase):
     def test_direct_endpoint_and_unprotected_config_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Path(temp) / 'config'
-            for text in ('[meta]\njoin_password=\n', '[meta]\njoin_password=secret\nmetaserver_hostname=example.org\n'):
+            for text in ('[meta]\njoin_password=\n', '[meta]\naccess_required=true\nmetaserver_hostname=example.org\n'):
                 config.write_text(text)
                 with self.assertRaises(d.Rejected):
                     d.validate_config(config)
-            config.write_text('[meta]\njoin_password=secret\nmetaserver_hostname=\n')
+            config.write_text('[meta]\naccess_required=true\nmetaserver_hostname=\n')
             d.validate_config(config)
 
     def test_protected_save_fingerprints_detect_modification_and_loss(self):
@@ -189,21 +189,21 @@ class Safety(unittest.TestCase):
             save = state / 'server-data/players/player.dat'
             config = state / 'config/server-custom.cfg'
             save.write_bytes(b'original player inventory')
-            config.write_bytes(b'original private configuration')
+            config.write_bytes(b'[meta]\naccess_required=false\n')
+            (state / 'server-data/quic-identity.pem').write_bytes(b'certificate fixture')
             (runtime / 'pin.json').write_text(json.dumps(pin()))
             subprocess.run(['tar', '--format=pax', '--acls', '--xattrs', '--numeric-owner', '-cpf', str(backup / 'cohort.tar'), '-C', '/', str(state).lstrip('/'), str(runtime).lstrip('/')], check=True)
             (backup / 'image.tar').write_bytes(b'archived exact image fixture')
-            (backup / 'manifest.json').write_text(json.dumps({'sha256': d.file_hash(backup / 'cohort.tar'), 'image_sha256': d.file_hash(backup / 'image.tar'), 'identity': 'fixture', 'pin': pin()}))
+            (backup / 'manifest.json').write_text(json.dumps({'sha256': d.file_hash(backup / 'cohort.tar'), 'image_sha256': d.file_hash(backup / 'image.tar'), 'identity': 'fixture', 'pin': pin(), 'access_state': {'config/server-custom.cfg': d.file_hash(config), 'server-data/quic-identity.pem': d.file_hash(state / 'server-data/quic-identity.pem')}}))
             save.write_bytes(b'failed candidate writes')
-            config.write_bytes(b'failed candidate configuration')
             (runtime / 'pin.json').write_text(json.dumps(pin('5.77.0', release=102)))
             real_command = d.command
             def command(*args, **kwargs):
                 return '' if args[:3] == ('docker', 'image', 'load') else real_command(*args, **kwargs)
-            with patch.object(d, 'STATE', state), patch.object(d, 'ROOT', runtime), patch.object(d, 'stopped'), patch.object(d, 'identity', return_value='fixture'), patch.object(d, 'inspect_image'), patch.object(d, 'load', side_effect=lambda path: json.loads(path.read_text())), patch.object(d, 'command', side_effect=command):
+            with patch.object(d, 'STATE', state), patch.object(d, 'ROOT', runtime), patch.object(d, 'stopped'), patch.object(d, 'private'), patch.object(d, 'identity', return_value='fixture'), patch.object(d, 'inspect_image'), patch.object(d, 'load', side_effect=lambda path: json.loads(path.read_text())), patch.object(d, 'command', side_effect=command):
                 d.restore(backup)
             self.assertEqual(save.read_bytes(), b'original player inventory')
-            self.assertEqual(config.read_bytes(), b'original private configuration')
+            self.assertEqual(config.read_bytes(), b'[meta]\naccess_required=false\n')
             self.assertEqual(json.loads((runtime / 'pin.json').read_text()), pin())
             failed = state.with_name('development-failed-' + backup.name)
             self.assertEqual((failed / 'server-data/players/player.dat').read_bytes(), b'failed candidate writes')
@@ -232,40 +232,12 @@ class Safety(unittest.TestCase):
             self.assertTrue(all(p.exists() for p in paths[4:]))
             self.assertEqual(sum(p.exists() for p in paths), 9)
 
-    def test_invitation_lifetime_matches_native_boundaries_without_skew(self):
-        now = 1_800_000_000
-        identity = 'a' * 64
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            invitation = state / 'server-data/rendezvous-invite'
-            invitation.parent.mkdir()
-            for remaining in (-1, 0, 1, 604800, 604801):
-                value = 'atrinik-invite-v1.' + identity + '.' + 'b' * 32 + '.' + 'c' * 64 + '.' + str(now + remaining)
-                invitation.write_text(value)
-                with self.subTest(remaining=remaining), patch.object(d, 'STATE', state), patch.object(d, 'private'), patch.object(d.time, 'time', return_value=now + 0.9):
-                    if 0 < remaining <= 604800:
-                        d.validate_invite(identity)
-                    else:
-                        with self.assertRaisesRegex(d.Rejected, 'explicit renewal required'):
-                            d.validate_invite(identity)
-                self.assertEqual(invitation.read_text(), value)
-
-    def test_invalid_invitation_refuses_update_before_shutdown_or_writes(self):
-        now = 1_800_000_000
-        identity = 'a' * 64
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            invitation = state / 'server-data/rendezvous-invite'
-            invitation.parent.mkdir()
-            for expiry in (now, now + 604801):
-                value = 'atrinik-invite-v1.' + identity + '.' + 'b' * 32 + '.' + 'c' * 64 + '.' + str(expiry)
-                invitation.write_text(value)
-                with self.subTest(expiry=expiry), patch.object(d, 'STATE', state), patch.object(d, 'private'), patch.object(d.time, 'time', return_value=now), patch.object(d, 'fence', side_effect=lambda: d.validate_invite(identity)), patch.object(d, 'admin_stop') as stop, patch.object(d, 'guard') as guard, patch.object(d, 'atomic') as write, self.assertRaises(d.Rejected):
-                    d.activate(pin('5.77.0', release=102))
-                stop.assert_not_called()
-                guard.assert_not_called()
-                write.assert_not_called()
-                self.assertEqual(invitation.read_text(), value)
+    def test_invalid_access_store_refuses_update_before_shutdown_or_writes(self):
+        with patch.object(d, 'fence', side_effect=d.Rejected('invalid access store')), patch.object(d, 'admin_stop') as stop, patch.object(d, 'guard') as guard, patch.object(d, 'atomic') as write, self.assertRaises(d.Rejected):
+            d.activate(pin('5.77.0', release=102))
+        stop.assert_not_called()
+        guard.assert_not_called()
+        write.assert_not_called()
 
     def test_wrong_machine_fails_before_any_command(self):
         with patch.object(d.os, 'geteuid', return_value=0), patch.object(Path, 'read_text', return_value='wrong'), patch.object(d, 'command') as cmd, self.assertRaises(d.Rejected):
@@ -292,7 +264,7 @@ class Safety(unittest.TestCase):
             if path.name == 'policy.json':
                 return {'activation_enabled': True}
             return pin() if path.name == 'pin.json' else {'accepted': [pin()]}
-        with patch.multiple(d, accepted_compatibility=DEFAULT, validate_invite=DEFAULT, validate_runtime=DEFAULT, image_capability=DEFAULT, require_admin=DEFAULT, graceful_stop=DEFAULT, inspect_image=DEFAULT, verify_provenance=DEFAULT, headroom=DEFAULT, launch=DEFAULT, admin_stop=DEFAULT, fence=DEFAULT, stopped=DEFAULT), patch.object(d, 'command', side_effect=lambda *args, **kwargs: '[{}]' if args[:2] == ('docker', 'inspect') else ''), patch.object(d, 'guard'), patch.object(d, 'load', side_effect=load), patch.object(Path, 'exists', return_value=False), patch.object(d, 'archive', return_value=Path('/backup')), patch.object(d, 'clone_check', side_effect=d.Rejected('failed migration')), patch.object(d, 'atomic') as write, self.assertRaises(d.Rejected):
+        with patch.multiple(d, accepted_compatibility=DEFAULT, validate_access=DEFAULT, validate_runtime=DEFAULT, image_capability=DEFAULT, require_admin=DEFAULT, graceful_stop=DEFAULT, inspect_image=DEFAULT, verify_provenance=DEFAULT, headroom=DEFAULT, launch=DEFAULT, admin_stop=DEFAULT, fence=DEFAULT, stopped=DEFAULT), patch.object(d, 'command', side_effect=lambda *args, **kwargs: '[{}]' if args[:2] == ('docker', 'inspect') else ''), patch.object(d, 'guard'), patch.object(d, 'load', side_effect=load), patch.object(Path, 'exists', return_value=False), patch.object(d, 'archive', return_value=Path('/backup')), patch.object(d, 'clone_check', side_effect=d.Rejected('failed migration')), patch.object(d, 'atomic') as write, self.assertRaises(d.Rejected):
             d.activate(candidate)
         self.assertTrue(write.called)
         self.assertTrue(all(call.args[0].name == 'transaction.json' for call in write.call_args_list))
@@ -303,7 +275,7 @@ class Safety(unittest.TestCase):
             if path.name == 'policy.json':
                 return {'activation_enabled': True}
             return pin() if path.name == 'pin.json' else {'accepted': [pin()]}
-        with patch.multiple(d, accepted_compatibility=DEFAULT, validate_invite=DEFAULT, validate_runtime=DEFAULT, image_capability=DEFAULT, require_admin=DEFAULT, graceful_stop=DEFAULT, inspect_image=DEFAULT, verify_provenance=DEFAULT, headroom=DEFAULT, launch=DEFAULT, admin_stop=DEFAULT, fence=DEFAULT, stopped=DEFAULT), patch.object(d, 'command', side_effect=lambda *args, **kwargs: '[{}]' if args[:2] == ('docker', 'inspect') else ''), patch.object(d, 'guard') as guard, patch.object(d, 'load', side_effect=load), patch.object(Path, 'exists', return_value=False), patch.object(d, 'archive', return_value=Path('/backup')), patch.object(d, 'clone_check'), patch.object(d, 'healthy', side_effect=d.Rejected('health failed')), patch.object(d, 'atomic'), patch.object(d, 'restore') as restore, self.assertRaises(d.Rejected):
+        with patch.multiple(d, accepted_compatibility=DEFAULT, validate_access=DEFAULT, validate_runtime=DEFAULT, image_capability=DEFAULT, require_admin=DEFAULT, graceful_stop=DEFAULT, inspect_image=DEFAULT, verify_provenance=DEFAULT, headroom=DEFAULT, launch=DEFAULT, admin_stop=DEFAULT, fence=DEFAULT, stopped=DEFAULT), patch.object(d, 'command', side_effect=lambda *args, **kwargs: '[{}]' if args[:2] == ('docker', 'inspect') else ''), patch.object(d, 'guard') as guard, patch.object(d, 'load', side_effect=load), patch.object(Path, 'exists', return_value=False), patch.object(d, 'archive', return_value=Path('/backup')), patch.object(d, 'clone_check'), patch.object(d, 'healthy', side_effect=d.Rejected('health failed')), patch.object(d, 'atomic'), patch.object(d, 'restore') as restore, self.assertRaises(d.Rejected):
             d.activate(candidate)
         restore.assert_called_once_with(Path('/backup'))
         self.assertNotIn(('public',), [call.args for call in guard.call_args_list])
@@ -321,7 +293,7 @@ class Safety(unittest.TestCase):
         def guard(mode):
             if mode == 'public':
                 raise d.Rejected('uncertain public state')
-        with patch.multiple(d, accepted_compatibility=DEFAULT, validate_invite=DEFAULT, validate_runtime=DEFAULT, image_capability=DEFAULT, require_admin=DEFAULT, graceful_stop=DEFAULT, inspect_image=DEFAULT, verify_provenance=DEFAULT, headroom=DEFAULT, launch=DEFAULT, admin_stop=DEFAULT, fence=DEFAULT, stopped=DEFAULT), patch.object(d, 'command', side_effect=lambda *args, **kwargs: '[{}]' if args[:2] == ('docker', 'inspect') else ''), patch.object(d, 'guard', side_effect=guard), patch.object(d, 'load', side_effect=load), patch.object(Path, 'exists', return_value=False), patch.object(d, 'archive', return_value=Path('/backup')), patch.object(d, 'clone_check'), patch.object(d, 'healthy'), patch.object(d, 'identity', return_value='dev'), patch.object(d, 'atomic') as writes, patch.object(d, 'restore') as restore, self.assertRaises(d.Rejected):
+        with patch.multiple(d, accepted_compatibility=DEFAULT, validate_access=DEFAULT, validate_runtime=DEFAULT, image_capability=DEFAULT, require_admin=DEFAULT, graceful_stop=DEFAULT, inspect_image=DEFAULT, verify_provenance=DEFAULT, headroom=DEFAULT, launch=DEFAULT, admin_stop=DEFAULT, fence=DEFAULT, stopped=DEFAULT), patch.object(d, 'command', side_effect=lambda *args, **kwargs: '[{}]' if args[:2] == ('docker', 'inspect') else ''), patch.object(d, 'guard', side_effect=guard), patch.object(d, 'load', side_effect=load), patch.object(Path, 'exists', return_value=False), patch.object(d, 'archive', return_value=Path('/backup')), patch.object(d, 'clone_check'), patch.object(d, 'healthy'), patch.object(d, 'identity', return_value='dev'), patch.object(d, 'atomic') as writes, patch.object(d, 'restore') as restore, self.assertRaises(d.Rejected):
             d.activate(candidate)
         restore.assert_not_called()
         self.assertEqual(writes.call_args_list[-1].args[1]['phase'], 'may-have-played')

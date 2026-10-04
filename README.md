@@ -60,7 +60,9 @@ updates service releases; it does not replace its own trusted controller/image.
 ## Safety and extension
 
 The adapter proves host/state identity, image provenance, compatibility and
-capacity before requesting a checked application drain. For Classic this means
+capacity before requesting a checked application drain. Classic access validation
+uses native token-store status; empty or expired protected stores remain valid,
+and the updater never issues or renews credentials. For Classic this means
 an authenticated Unix-socket in-game countdown and durable saved receipt from
 the exact container, with no live signal fallback.
 

@@ -7,6 +7,7 @@ SIGTERM for an unavailable live-server warning channel.
 """
 import argparse
 import configparser
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -204,35 +205,102 @@ def fence(require_pin=True):
     need(re.fullmatch(HEX, expected_identity) and expected_identity != PRODUCTION_ID, 'invalid development identity fence')
     need(identity() == expected_identity, 'development identity mismatch')
     validate_config(STATE / 'config/server-custom.cfg')
-    if (STATE / 'server-data/rendezvous-invite').exists():
-        validate_invite(expected_identity)
+    legacy_invite = STATE / 'server-data/rendezvous-invite'
+    need(not legacy_invite.exists() and not legacy_invite.is_symlink(), 'legacy invitation requires explicit offline migration')
     need(LEGACY_GUARD not in command('nft', 'list', 'tables'), 'legacy guard must be retired explicitly')
     if require_pin:
         current_pin = validate_pin(load(ROOT / 'pin.json'))
         ledger = load(ROOT / 'ledger.json')
         need(type(ledger.get('accepted')) is list and ledger['accepted'] and ledger['accepted'][-1] == current_pin, 'pin and accepted ledger disagree')
-        inspect_image(load(ROOT / 'pin.json'))
+        inspect_image(current_pin)
+        validate_access(expected_identity, pin=current_pin)
 
 def validate_config(path):
     config = configparser.ConfigParser(interpolation=None, strict=True)
     config.read_string(path.read_text())
     meta = config['meta']
-    need(bool(meta.get('join_password', '').strip().strip('"')), 'development join password required')
-    need(not meta.get('join_password_file', '').strip().strip('"'), 'external password path not supported')
-    need(not meta.get('metaserver_hostname', '').strip().strip('"'), 'direct endpoint publication forbidden')
+    def setting(name, default=None):
+        value = meta.get(name, default)
+        if value is None:
+            return None
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+            value = value[1:-1]
+        need('"' not in value and '\n' not in value, 'invalid access configuration value')
+        return value
+    need(not any(name in meta for name in ('join_password', 'join_password_file', 'rendezvous_invite_file')),
+         'legacy access configuration requires explicit offline migration')
+    required = setting('access_required')
+    need(required in ('true', 'false'), 'explicit access_required=true|false policy required')
+    need(setting('access_initialize', 'false') == 'false', 'updater cannot initialize access state')
+    need(setting('access_store') in (None, '/opt/atrinik/server/data/access-tokens'), 'external access store forbidden')
+    allowlist = setting('access_admin_accounts')
+    need(allowlist in (None, '/opt/atrinik/server/access-admin-accounts'), 'external access allowlist forbidden')
+    need(not setting('metaserver_hostname', ''), 'direct endpoint publication forbidden')
     need(PRODUCTION_ENDPOINT not in meta.get('server_desc', ''), 'production direct address forbidden')
-    need(meta.get('rendezvous_invite_file', '').strip().strip(chr(34)) == '', 'nonstandard invite path forbidden')
+    return {'policy': 'protected' if required == 'true' else 'open', 'allowlist': allowlist is not None}
 
 
-def validate_invite(expected_identity):
-    path = STATE / 'server-data/rendezvous-invite'
-    private(path, 10001, 10001, (0o600, 0o400))
-    need(path.stat().st_size <= 256, 'oversize invite')
-    match = re.fullmatch(r'atrinik-invite-v1\.([0-9a-f]{64})\.[0-9a-f]{32}\.[0-9a-f]{64}\.([1-9][0-9]{0,19})', path.read_text().strip())
-    need(match is not None and match[1] == expected_identity and int(match[2]) <= 2**64 - 1, 'invite identity binding invalid')
-    # Match native rendezvous_invite_valid_at: Unix whole seconds, no skew.
-    remaining = int(match[2]) - int(time.time())
-    need(0 < remaining <= 7 * 24 * 60 * 60, 'invitation expired or exceeds seven days; explicit renewal required')
+def access_paths(state):
+    policy = validate_config(state / 'config/server-custom.cfg')
+    allowlist = state / 'config/access-admin-accounts'
+    need(not allowlist.is_symlink(), 'access allowlist symlink forbidden')
+    if policy['allowlist'] or allowlist.exists():
+        private(allowlist, 0, 10001, (0o440, 0o640))
+    store = state / 'server-data/access-tokens'
+    need(not store.is_symlink(), 'access store symlink forbidden')
+    if store.exists():
+        private(store, 10001, 10001, (0o700,), True)
+        need({path.name for path in store.iterdir()} == {'access-tokens.snapshot'}, 'unexpected access store contents')
+        private(store / 'access-tokens.snapshot', 10001, 10001, (0o600,))
+    else:
+        need(policy['policy'] == 'open', 'protected access store missing')
+    return policy
+
+
+def access_footprint(state):
+    """Bind complete authorization state, without recording credential contents."""
+    access_paths(state)
+    private(state / 'config/server-custom.cfg', 0, 10001, (0o440, 0o640))
+    private(state / 'server-data/quic-identity.pem', 10001, 10001, (0o600, 0o400))
+    paths = ['config/server-custom.cfg', 'server-data/quic-identity.pem']
+    for optional in ('config/access-admin-accounts', 'server-data/access-tokens/access-tokens.snapshot'):
+        if (state / optional).exists():
+            paths.append(optional)
+    return {name: file_hash(state / name) for name in paths}
+
+
+def offline_access_status(state, pin, expected_identity, policy):
+    # The native inspector independently takes the existing data-directory lock,
+    # reads the full store without initialization/reconciliation, and never starts
+    # a server. Read-only mounts enforce that boundary even on an image regression.
+    inspect_image(pin)
+    verify_provenance(pin)
+    args = ['docker', 'run', '--rm', '--pull', 'never', '--platform', 'linux/amd64',
+            '--network', 'none', '--read-only', '--user', '10001:10001',
+            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+            '--pids-limit', '64', '--memory', '128m', '--cpus', '1',
+            '--mount', 'type=bind,src=' + str(state / 'server-data') + ',dst=/opt/atrinik/server/data,readonly',
+            '--entrypoint', '/opt/atrinik/server/atrinik-access-status', pin['image_id'],
+            '--data-dir', '/opt/atrinik/server/data',
+            '--store-dir', '/opt/atrinik/server/data/access-tokens',
+            '--certificate', '/opt/atrinik/server/data/quic-identity.pem', '--policy', policy]
+    return validate_access_status(access_json(command(*args, timeout=30)), expected_identity, policy)
+
+
+def validate_access(expected_identity, state=None, pin=None, name=None, admin=None):
+    state = STATE if state is None else state
+    pin = load(ROOT / 'pin.json') if pin is None else pin
+    name = CONTAINER if name is None else name
+    policy = access_paths(state)['policy']
+    if command('docker', 'ps', '-q', '--filter', 'name=^/' + re.escape(name) + '$'):
+        obj = json.loads(command('docker', 'inspect', name))[0]
+        if state == STATE:
+            validate_runtime(obj, pin)
+        capabilities = admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', obj['State']['Pid'], admin))
+        need('access-tokens-v1' in capabilities, 'native access-token status capability missing')
+        return admin_access_status(obj['State']['Pid'], expected_identity, policy, admin)
+    return offline_access_status(state, pin, expected_identity, policy)
 
 
 def validate_pin(pin):
@@ -278,7 +346,7 @@ class ClassicAdapter:
     """Resolve current globals so service hooks retain their existing tests."""
     hooks = {'drain': 'admin_stop', 'capability': 'image_capability',
              'compatibility': 'accepted_compatibility', 'require_control': 'require_admin',
-             'validate_access': 'validate_invite', 'stop_isolated': 'graceful_stop'}
+             'stop_isolated': 'graceful_stop'}
 
     def __getattr__(self, name):
         return globals()[self.hooks.get(name, name)]
@@ -344,7 +412,8 @@ def image_capability(pin):
     help_text = command('docker', 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none', '--user', '10001:10001',
                         '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                         '--entrypoint', '/opt/atrinik/server/atrinik-server', pin['image_id'], '--help')
-    need('admin_shutdown_socket' in help_text, 'published image lacks native countdown capability')
+    need('admin_shutdown_socket' in help_text and 'access_required' in help_text,
+         'published image lacks native countdown or access-token capability')
 
 
 def inspect_image(pin):
@@ -371,6 +440,9 @@ def container_args(name, state, pin, isolated, admin_root=None):
             '--env', 'ATRINIK_SERVER_PUBLIC=' + ('false' if isolated else 'true'),
             '--health-cmd', '/usr/local/bin/atrinik-server-healthcheck', '--health-interval', '10s',
             '--health-timeout', '5s', '--health-retries', '3', '--health-start-period', '20s']
+    allowlist = state / 'config/access-admin-accounts'
+    if allowlist.exists():
+        args += ['--mount', 'type=bind,src=' + str(allowlist) + ',dst=/opt/atrinik/server/access-admin-accounts,readonly']
     if not isolated or admin_root:
         args += ['--mount', f'type=bind,src={admin_root or ADMIN.parent},dst={ADMIN.parent}',
                  '--env', 'ATRINIK_ADMIN_SHUTDOWN_SOCKET=' + str(ADMIN)]
@@ -385,18 +457,26 @@ def healthy(name):
         time.sleep(5)
     raise Rejected('health timeout')
 
-def admin_request(request, expected_pid, admin=None):
+@contextlib.contextmanager
+def admin_connection(request, expected_pid, admin=None):
     admin = ADMIN if admin is None else admin
     private(admin.parent, 10001, 10001, (0o700,), True)
     info = admin.lstat()
     need(stat.S_ISSOCK(info.st_mode) and info.st_uid == 10001 and stat.S_IMODE(info.st_mode) == 0o600, 'unsafe admin socket')
+    encoded = request.encode('ascii') + b'\n'
+    need(len(encoded) <= 1024 and encoded.count(b'\n') == 1, 'invalid admin request')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(5)
         client.connect(str(admin))
         pid, uid, gid = struct.unpack('3i', client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         need(pid == expected_pid and uid == gid == 10001, 'wrong admin peer identity')
-        client.sendall(request.encode('ascii') + b'\n')
+        client.sendall(encoded)
         client.shutdown(socket.SHUT_WR)
+        yield client
+
+
+def admin_request(request, expected_pid, admin=None):
+    with admin_connection(request, expected_pid, admin) as client:
         # Read through EOF so trailing frames cannot hide behind the first LF.
         limit = 2048 if request == 'ATRINIK-ADMIN/1 CAPABILITIES' else 1024
         response = b''
@@ -407,6 +487,79 @@ def admin_request(request, expected_pid, admin=None):
             response += chunk
     need(len(response) <= limit and response.endswith(b'\n') and response.count(b'\n') == 1 and response.isascii(), 'malformed admin response')
     return response[:-1].decode('ascii')
+
+
+def access_json(raw):
+    """No duplicate keys, non-JSON numbers or extra output from native status."""
+    need(isinstance(raw, (str, bytes)) and len(raw) <= 32768, 'invalid access status size')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            need(key not in result, 'duplicate access status field')
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise Rejected('non-JSON access status number')
+    try:
+        result = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+    except (ValueError, UnicodeError):
+        raise Rejected('malformed access status JSON') from None
+    need(type(result) is dict, 'invalid access status object')
+    return result
+
+
+def access_revision(value):
+    need(type(value) is str and re.fullmatch(r'0|[1-9][0-9]{0,19}', value) and
+         int(value) <= 2**64 - 1, 'invalid access store revision')
+    return value
+
+
+def validate_access_status(status, expected_identity, policy):
+    need(type(status) is dict and policy in ('open', 'protected'), 'invalid access status')
+    base = {'state', 'schemaVersion', 'serverIdentity', 'policy'}
+    need(type(status.get('schemaVersion')) is int and status['schemaVersion'] == 1 and
+         status.get('serverIdentity') == expected_identity and re.fullmatch(HEX, expected_identity) and
+         status.get('policy') == policy, 'access status identity, policy or schema mismatch')
+    if status.get('state') == 'absent_open':
+        need(policy == 'open' and set(status) == base, 'absent protected or malformed access store')
+    else:
+        need(status.get('state') == 'initialized' and
+             set(status) == base | {'integrity', 'durability', 'revision', 'pendingRouteSync'},
+             'unsupported access store status')
+        need(status['integrity'] == 'ok' and status['durability'] == 'ok', 'access store is not durably valid')
+        access_revision(status['revision'])
+        need(type(status['pendingRouteSync']) is int and 0 <= status['pendingRouteSync'] <= 32,
+             'invalid pending access route count')
+    return status
+
+
+def admin_access_status(expected_pid, expected_identity, policy, admin=None):
+    request_id = secrets.token_hex(16)
+    request = {'schema': 'atrinik-access-admin-v1', 'operation': 'status', 'requestId': request_id}
+    with admin_connection('ATRINIK-ADMIN/1 ACCESS ' + json.dumps(request, separators=(',', ':')),
+                          expected_pid, admin) as client:
+        header = b''
+        while len(header) < 30 and not header.endswith(b'\n'):
+            chunk = client.recv(1)
+            need(bool(chunk), 'truncated access status header')
+            header += chunk
+        match = re.fullmatch(rb'ATRINIK-ADMIN/1 ACCESS ([1-9][0-9]{0,4})\n', header)
+        need(match is not None and int(match[1]) <= 32768, 'invalid access status framing')
+        length = int(match[1])
+        payload = b''
+        while len(payload) < length:
+            chunk = client.recv(length - len(payload))
+            need(bool(chunk), 'truncated access status body')
+            payload += chunk
+        need(client.recv(1) == b'', 'trailing access status bytes')
+    response = access_json(payload)
+    need(set(response) == {'schema', 'operation', 'requestId', 'outcome', 'revision', 'result'} and
+         response['schema'] == request['schema'] and response['operation'] == 'status' and
+         response['requestId'] == request_id and response['outcome'] == 'committed',
+         'access status response binding or outcome mismatch')
+    status = validate_access_status(response['result'], expected_identity, policy)
+    need(response['revision'] == status.get('revision'), 'access status revision mismatch')
+    return status
 
 
 def admin_capabilities(response):
@@ -496,8 +649,10 @@ def archive():
              'etc/systemd/system/' + UPDATE_TIMER]
     if CONFIG_PATH is not None and not CONFIG_PATH.is_relative_to(ROOT):
         paths.append(str(CONFIG_PATH).lstrip('/'))
+    authorization = access_footprint(STATE)
     core.archive_files(target, BACKUPS, paths, load(ROOT / 'pin.json')['image_id'], command)
-    atomic(target / 'manifest.json', {'sha256': file_hash(target / 'cohort.tar'), 'image_sha256': file_hash(target / 'image.tar'), 'pin': load(ROOT / 'pin.json'), 'identity': identity()})
+    need(access_footprint(STATE) == authorization, 'authorization changed during backup')
+    atomic(target / 'manifest.json', {'sha256': file_hash(target / 'cohort.tar'), 'image_sha256': file_hash(target / 'image.tar'), 'pin': load(ROOT / 'pin.json'), 'identity': identity(), 'access_state': authorization})
     return target
 
 def protected_saves(state):
@@ -521,6 +676,9 @@ def clone_check(backup, candidate):
     command('tar', '--acls', '--xattrs', '--numeric-owner', '-xpf', backup / 'cohort.tar', '-C', clone, str(STATE).lstrip('/'), timeout=1800)
     copy = clone / str(STATE).lstrip('/')
     saves_before = protected_saves(copy)
+    authorization = access_footprint(copy)
+    need(authorization == load(backup / 'manifest.json')['access_state'], 'cloned authorization differs from backup')
+    offline_access_status(copy, candidate, identity(copy), access_paths(copy)['policy'])
     admin_root = clone / 'admin'
     admin_root.mkdir(mode=0o700)
     os.chown(admin_root, 10001, 10001)
@@ -529,10 +687,12 @@ def clone_check(backup, candidate):
     try:
         command(*container_args(name, copy, candidate, True, admin_root))
         healthy(name)
+        validate_access(identity(copy), copy, candidate, name, admin_root / ADMIN.name)
         admin_stop(name, admin_root / ADMIN.name)
         obj = json.loads(command('docker', 'inspect', name))[0]
         need(obj['State']['ExitCode'] == 0, 'candidate unclean shutdown')
         need(identity(copy) == load(backup / 'manifest.json')['identity'], 'candidate identity changed')
+        need(access_footprint(copy) == authorization, 'isolated candidate changed access grants, audit or route state')
         need(protected_saves(copy) == saves_before, 'isolated candidate changed protected saves or private maps')
         # No map may disappear into quarantine. Current normal startup retains
         # legacy private maps; any future incompatible activation fails closed.
@@ -547,6 +707,10 @@ def restore(backup):
     manifest = load(backup / 'manifest.json')
     need(file_hash(backup / 'cohort.tar') == manifest['sha256'], 'rollback archive checksum mismatch')
     need(file_hash(backup / 'image.tar') == manifest['image_sha256'], 'rollback image archive checksum mismatch')
+    # A local operator or candidate may have committed a newer revocation while
+    # ingress was closed. Never replace it with an older authorization snapshot.
+    need(access_footprint(STATE) == manifest.get('access_state'),
+         'authorization changed after backup; explicit coherent recovery required')
     command('docker', 'image', 'load', '--input', backup / 'image.tar', timeout=1800)
     inspect_image(manifest['pin'])
     failed = STATE.with_name(STATE.name + '-failed-' + backup.name)
@@ -587,9 +751,13 @@ def validate_runtime(obj, pin):
     need(obj.get('Image') == pin['image_id'] and obj['Config']['Image'] == pin['image_id'] and obj['Config'].get('Labels', {}).get('org.atrinik.development.managed') == 'true', 'unexpected existing runtime')
     need(obj['Config']['User'] == '10001:10001' and obj['HostConfig']['NetworkMode'] == 'host', 'runtime security mismatch')
     mounts = {m['Destination']: (m['Source'], m['RW']) for m in obj['Mounts'] if m['Type'] == 'bind'}
-    need(mounts == {'/opt/atrinik/server/data': (str(STATE / 'server-data'), True),
-                    '/opt/atrinik/server/server-custom.cfg': (str(STATE / 'config/server-custom.cfg'), False),
-                    str(ADMIN.parent): (str(ADMIN.parent), True)}, 'runtime cohort mount mismatch')
+    expected_mounts = {'/opt/atrinik/server/data': (str(STATE / 'server-data'), True),
+                       '/opt/atrinik/server/server-custom.cfg': (str(STATE / 'config/server-custom.cfg'), False),
+                       str(ADMIN.parent): (str(ADMIN.parent), True)}
+    allowlist = STATE / 'config/access-admin-accounts'
+    if allowlist.exists():
+        expected_mounts['/opt/atrinik/server/access-admin-accounts'] = (str(allowlist), False)
+    need(mounts == expected_mounts, 'runtime cohort mount mismatch')
 
 
 def launch(pin):
@@ -619,7 +787,7 @@ def run():
             launch(pin)
         healthy(CONTAINER)
         require_admin(CONTAINER)
-        validate_invite(identity())
+        validate_access(identity())
         fence()
         guard('public')
     return int(command('docker', 'wait', CONTAINER, timeout=365 * 86400))

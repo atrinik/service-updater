@@ -30,9 +30,45 @@ closed access must include loopback to prevent candidate writes before acceptanc
 
 The protected state cohort contains `server-data`, including its initialization
 marker, complete accounts/players/private maps and development QUIC certificate,
-plus `config/server-custom.cfg`. The adapter requires a join password, forbids
-publishing a direct endpoint, and validates the invitation's identity binding
-and strict native seven-day lifetime. It never rotates credentials/invitations.
+plus `config/server-custom.cfg`. The adapter requires an explicit
+`[meta] access_required=true` (protected) or `false` (open), independently of
+individual credentials. It forbids publishing a direct endpoint and retains the
+development certificate identity. Legacy `join_password`, `join_password_file`
+and `rendezvous_invite_file` settings, and the old invitation file, are rejected;
+transition requires explicit offline migration before this adapter can run.
+Account authentication and player saves are separate and remain unchanged.
+
+The canonical token directory is `server-data/access-tokens`, owned by UID/GID
+10001 with mode 0700. Its sole mode-0600 file, `access-tokens.snapshot`, contains
+all grants, audit history, removal tombstones, mutation receipts, route outbox
+and commit state. Omit `access_store` or use the container path
+`/opt/atrinik/server/data/access-tokens`; external stores are forbidden.
+`access_initialize` must be absent or `false`: the updater never bootstraps,
+issues, renews, revokes or removes a credential.
+
+In-game token administrators may be configured through
+`access_admin_accounts=/opt/atrinik/server/access-admin-accounts`. This maps to
+`config/access-admin-accounts` in the cohort, owned by root with group 10001 and
+mode 0440 or 0640, and mounted read-only. Omit the setting when no allowlist is
+configured; an empty allowlist file grants nobody access. Do not grant authority
+through inherited player groups. Optional path settings cannot be blank.
+
+Store health comes from the native `access-tokens-v1` status contract. Running
+services answer an authenticated root Unix-socket request with a bounded,
+length-prefixed JSON response. Stopped services use the published image's
+`/opt/atrinik/server/atrinik-access-status` command in a network-isolated,
+read-only container with only the read-only data-directory mount. Its arguments
+are `--data-dir`, `--store-dir`, `--certificate` and `--policy`; none contains a
+credential. The native inspector must acquire the existing data directory's
+exclusive lock and validate without startup, initialization, reconciliation,
+networking or writes. Image provenance is checked before executing it.
+
+Both paths require the exact supported status schema, certificate identity,
+configured policy, integrity and durability. An initialized protected store is
+valid when empty, revoked or fully expired. An absent store is valid only for
+explicit open policy. The updater never reads token expiry or fabricates use
+history. Duplicate or unknown JSON fields, response/request mismatch, malformed
+framing and unavailable native status fail closed; there is no legacy fallback.
 
 The configured root holds these root-owned mode-0600 records:
 
@@ -57,19 +93,32 @@ and disabled until acceptance. The controller never seeds a private cohort.
 Before a live update, the adapter authenticates native Unix socket peer PID/UID,
 requires countdown and durable-result capabilities, requests a 60-second player
 warning, and accepts only the exact saved receipt plus clean container exit.
+Capabilities form a bounded unordered set: at most 32 distinct ASCII tokens of
+1–48 lowercase letters, digits or hyphens in a line of at most 2048 bytes.
+Unknown well-formed capabilities are tolerated; `shutdown-v1` and
+`durable-result-v1` remain required. Access validation additionally requires
+`access-tokens-v1`. The native save result must cover token/audit/outbox state
+as well as game saves.
 There is no live SIGTERM/SIGKILL fallback. After shutdown it closes ingress,
 archives the complete state/config/records and old image, verifies the archives,
 and fsyncs files/directories before recording a manifest.
 
 An isolated clone runs without network and must shut down through the same
 checked save interface. Account/player/private-map file sets and byte hashes
-must remain unchanged in this idle check; quarantine is rejected. The live
+must remain unchanged in this idle check; quarantine is rejected. The complete
+authorization snapshot, allowlist, configuration and certificate are fingerprinted
+in the backup manifest and must also remain unchanged in the isolated clone.
+No clone publishes routes, admits a real player or supplies an operator code. The live
 candidate starts behind closed ingress, then must pass runtime mounts, identity,
-health, invitation and control checks. The accepted ledger and irreversible
+health, access-store status and control checks. The accepted ledger and irreversible
 transaction boundary are durable before ingress opens.
 
 Pre-boundary failure may restore the complete previous cohort while retaining
-failed saves; it stays stopped for review. Post-boundary automatic restoration
+failed saves; it stays stopped for review. Before restoring anything, the
+adapter compares current authorization state with the archived fingerprint. A
+newer revocation, audit/outbox change, policy or identity change blocks automatic
+restoration and preserves the closed failed cohort for explicit coherent recovery.
+An old backup without that fingerprint is also rejected. Post-boundary automatic restoration
 is forbidden. Interrupted transactions, failed archives and candidate clones
 remain for investigation. Never delete a transaction to force a start. Retention
 keeps the first verified completed backup and six newest completed backups;
@@ -77,4 +126,8 @@ failed/incomplete backups do not displace those slots.
 
 Unit tests and an image health result do not replace real deployment acceptance:
 a published native-interface image, real countdown/save evidence, all restored
-private-map gameplay checks, and development discovery/access must pass first.
+private-map gameplay checks, and development discovery/access must pass first. In particular, the native access
+inspector, initialized/absent-open status, checked token persistence, revocation
+and audit preservation need producer/consumer integration acceptance against the
+exact compatible published release. Mocked status fixtures do not prove native
+store parsing or distributed revocation behavior.
