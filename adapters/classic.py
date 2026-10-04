@@ -397,19 +397,37 @@ def admin_request(request, expected_pid, admin=None):
         need(pid == expected_pid and uid == gid == 10001, 'wrong admin peer identity')
         client.sendall(request.encode('ascii') + b'\n')
         client.shutdown(socket.SHUT_WR)
+        # Read through EOF so trailing frames cannot hide behind the first LF.
+        limit = 2048 if request == 'ATRINIK-ADMIN/1 CAPABILITIES' else 1024
         response = b''
-        while b'\n' not in response and len(response) <= 1024:
-            chunk = client.recv(1025 - len(response))
+        while len(response) <= limit:
+            chunk = client.recv(limit + 1 - len(response))
             if not chunk:
                 break
             response += chunk
-    need(len(response) <= 1024 and response.endswith(b'\n') and response.count(b'\n') == 1, 'malformed admin response')
-    return response.decode('ascii').strip()
+    need(len(response) <= limit and response.endswith(b'\n') and response.count(b'\n') == 1 and response.isascii(), 'malformed admin response')
+    return response[:-1].decode('ascii')
+
+
+def admin_capabilities(response):
+    """Parse the bounded native capability set; unknown tokens are extensible."""
+    prefix = 'ATRINIK-ADMIN/1 CAPABILITIES '
+    need(isinstance(response, str) and response.isascii() and
+         len(response) + 1 <= 2048 and response.startswith(prefix),
+         'malformed admin capabilities')
+    tokens = response[len(prefix):].split(' ')
+    need(1 <= len(tokens) <= 32 and
+         all(re.fullmatch(r'[a-z0-9-]{1,48}', token) for token in tokens) and
+         len(set(tokens)) == len(tokens), 'malformed admin capabilities')
+    capabilities = frozenset(tokens)
+    need({'shutdown-v1', 'durable-result-v1'} <= capabilities,
+         'native countdown capabilities missing')
+    return capabilities
 
 
 def require_admin(name):
     obj = json.loads(command('docker', 'inspect', name))[0]
-    need(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', obj['State']['Pid']) == 'ATRINIK-ADMIN/1 CAPABILITIES shutdown-v1 durable-result-v1', 'native countdown capability missing')
+    admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', obj['State']['Pid']))
 
 def admin_stop(name=None, admin=None):
     name = CONTAINER if name is None else name
@@ -421,7 +439,7 @@ def admin_stop(name=None, admin=None):
         validate_runtime(obj, load(ROOT / 'pin.json'))
     expected_id = obj['Id']
     pid = obj['State']['Pid']
-    need(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', pid, admin) == 'ATRINIK-ADMIN/1 CAPABILITIES shutdown-v1 durable-result-v1', 'published native countdown capability required')
+    admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', pid, admin))
     request_id = secrets.token_hex(16)
     result = admin.with_name(admin.name + '.' + request_id + '.result')
     need(not result.exists(), 'admin request result already exists')
