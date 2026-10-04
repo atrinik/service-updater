@@ -60,9 +60,9 @@ jobs:
           push: false
           tags: service-updater-ci:fixture
       - name: Verify public provenance and reject negative cases without credentials
-        env:
-          LOCAL_IMAGE: ${{ steps.image.outputs.imageid }}
-        run: python3 scripts/smoke_public.py "${LOCAL_IMAGE}" --local-image
+        run: |
+          local_image=$(docker image inspect service-updater-ci:fixture --format '{{.Id}}')
+          python3 scripts/smoke_public.py "${local_image}" --local-image
   release-contract:
     name: Release engine contract
     runs-on: ubuntu-24.04
