@@ -6,7 +6,7 @@ countdown control and legacy private-map save support. Never substitute
 SIGTERM for an unavailable live-server warning channel.
 """
 import argparse
-import configparser
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -50,6 +50,10 @@ VERIFIER_IMAGE = ''
 CONFIG_PATH = None
 INSTALLATION_ROOT = Path('/opt/service-updater')
 SIGNER_WORKFLOW = REPO + '/.github/workflows/package-release.yml'
+RELEASE_CHANNEL = 'stable'
+SOURCE_REF = DISCOVERY_TAG = None
+DEVELOPMENT_IMAGE = 'ghcr.io/atrinik/classic-server'
+DEVELOPMENT_WORKFLOW = 'atrinik/classic/.github/workflows/publish-development-server.yml'
 HEX = core.HEX
 Rejected = core.Rejected
 need = core.need
@@ -94,12 +98,26 @@ CONFIG_PATTERNS = {
 
 
 def validate_deployment(data):
-    need(type(data) is dict and set(data) == set(CONFIG_FIELDS) | {'schema_version'}, 'deployment config fields missing or unknown')
-    need(type(data['schema_version']) is int and data['schema_version'] == 1, 'unsupported deployment config schema')
-    values = {}
+    need(type(data) is dict and type(data.get('schema_version')) is int and
+         data['schema_version'] in (1, 2), 'unsupported deployment config schema')
+    channel = data.get('release_channel', 'stable')
+    extra = {'schema_version'}
+    if data['schema_version'] == 2:
+        extra.add('release_channel')
+        need(channel in ('stable', 'development'), 'invalid release channel')
+        if channel == 'development':
+            extra.update(('source_ref', 'discovery_tag'))
+            need(data.get('source_ref') == 'refs/heads/main' and data.get('discovery_tag') == 'development',
+                 'invalid development discovery tuple')
+    need(set(data) == set(CONFIG_FIELDS) | extra, 'deployment config fields missing or unknown')
+    patterns = dict(CONFIG_PATTERNS)
+    if channel == 'development':
+        patterns.update(release_image=re.escape(DEVELOPMENT_IMAGE), workflow=re.escape(DEVELOPMENT_WORKFLOW))
+    values = {'RELEASE_CHANNEL': channel, 'SOURCE_REF': data.get('source_ref'),
+              'DISCOVERY_TAG': data.get('discovery_tag')}
     for key, (name, kind) in CONFIG_FIELDS.items():
         value = data[key]
-        need(isinstance(value, str) and re.fullmatch(CONFIG_PATTERNS[kind], value), 'invalid deployment config: ' + key)
+        need(isinstance(value, str) and re.fullmatch(patterns[kind], value), 'invalid deployment config: ' + key)
         if kind == 'path':
             path = Path(value)
             need(str(path) == value and '..' not in path.parts and len(path.parts) >= 3, 'unsafe deployment path: ' + key)
@@ -204,35 +222,148 @@ def fence(require_pin=True):
     need(re.fullmatch(HEX, expected_identity) and expected_identity != PRODUCTION_ID, 'invalid development identity fence')
     need(identity() == expected_identity, 'development identity mismatch')
     validate_config(STATE / 'config/server-custom.cfg')
-    if (STATE / 'server-data/rendezvous-invite').exists():
-        validate_invite(expected_identity)
+    legacy_invite = STATE / 'server-data/rendezvous-invite'
+    need(not legacy_invite.exists() and not legacy_invite.is_symlink(), 'legacy invitation requires explicit offline migration')
     need(LEGACY_GUARD not in command('nft', 'list', 'tables'), 'legacy guard must be retired explicitly')
     if require_pin:
         current_pin = validate_pin(load(ROOT / 'pin.json'))
         ledger = load(ROOT / 'ledger.json')
         need(type(ledger.get('accepted')) is list and ledger['accepted'] and ledger['accepted'][-1] == current_pin, 'pin and accepted ledger disagree')
-        inspect_image(load(ROOT / 'pin.json'))
+        for accepted in ledger['accepted']:
+            validate_pin(accepted)
+        inspect_image(current_pin)
+        validate_access(expected_identity, pin=current_pin)
+
+def native_config(path):
+    """Accept an unambiguous subset of native line-oriented CLI configuration.
+
+    Native sections do not scope startup options, long options accept prefixes,
+    and config/file-indirection arguments have effects outside this file. Do not
+    interpret this format as INI or reproduce those unsafe extension mechanisms.
+    """
+    controlled = {'access_required', 'access_initialize', 'access_store',
+                  'access_admin_accounts', 'join_password', 'join_password_file',
+                  'rendezvous_invite_file', 'metaserver_hostname', 'server_desc'}
+    raw = path.read_bytes()
+    need(len(raw) <= 1024 * 1024, 'oversize native configuration')
+    values = {}
+    section = None
+    sections = set()
+    lines = raw.split(b'\n')
+    for number, physical in enumerate(lines):
+        # The native fgets buffer is 4096 bytes. A longer comment can itself
+        # split into an active directive, so bound lines before ignoring them.
+        need(len(physical) <= 4094, 'oversize native configuration line')
+        if physical.endswith(b'\r') and number < len(lines) - 1:
+            physical = physical[:-1]
+        try:
+            line = physical.decode('utf-8')
+        except UnicodeError:
+            raise Rejected('invalid native configuration encoding') from None
+        need(not any((ord(char) < 32 and char != '\t') or ord(char) == 127 for char in line) and
+             '\ufeff' not in line and '\\' not in line and '<' not in line,
+             'native configuration controls or indirection forbidden')
+        if not line.strip(' \t'):
+            continue
+        need(not line.startswith((' ', '\t')), 'indented native configuration forbidden')
+        if line.startswith('#'):
+            continue
+        if re.fullmatch(r'\[[a-z][a-z0-9_]*\]', line):
+            section = line[1:-1]
+            need(section not in sections, 'duplicate native configuration section')
+            sections.add(section)
+            continue
+        name, separator, value = line.partition('=')
+        name, value = name.strip(' \t'), value.strip(' \t')
+        need(section is not None and separator == '=' and re.fullmatch(r'[a-z][a-z0-9_]*', name) and
+             value != '', 'unsupported native configuration assignment')
+        # snprintf adds "--" to key=value inside another 4096-byte buffer.
+        need(len((name + '=' + value).encode('utf-8')) <= 4093,
+             'native configuration assignment would truncate')
+        need(name not in values, 'duplicate native configuration option')
+        need(name != 'config' and not any(option.startswith(name) and option != name
+             for option in controlled | {'config'}), 'native configuration include or alias forbidden')
+        need(name != 'access_admin_accounts',
+             'obsolete access administrator configuration requires explicit offline migration')
+        if name in controlled:
+            need(section == 'meta' and '"' not in value and "'" not in value,
+                 'controlled native option requires unquoted meta assignment')
+        values[name] = value
+    return values
+
 
 def validate_config(path):
-    config = configparser.ConfigParser(interpolation=None, strict=True)
-    config.read_string(path.read_text())
-    meta = config['meta']
-    need(bool(meta.get('join_password', '').strip().strip('"')), 'development join password required')
-    need(not meta.get('join_password_file', '').strip().strip('"'), 'external password path not supported')
-    need(not meta.get('metaserver_hostname', '').strip().strip('"'), 'direct endpoint publication forbidden')
-    need(PRODUCTION_ENDPOINT not in meta.get('server_desc', ''), 'production direct address forbidden')
-    need(meta.get('rendezvous_invite_file', '').strip().strip(chr(34)) == '', 'nonstandard invite path forbidden')
+    values = native_config(path)
+    need(not any(name in values for name in ('join_password', 'join_password_file', 'rendezvous_invite_file')),
+         'legacy access configuration requires explicit offline migration')
+    required = values.get('access_required')
+    need(required in ('true', 'false'), 'explicit access_required=true|false policy required')
+    need(values.get('access_initialize', 'false') == 'false', 'updater cannot initialize access state')
+    need(values.get('access_store') in (None, '/opt/atrinik/server/data/access-tokens'), 'external access store forbidden')
+    need('metaserver_hostname' not in values, 'direct endpoint publication forbidden')
+    need(PRODUCTION_ENDPOINT not in values.get('server_desc', ''), 'production direct address forbidden')
+    return {'policy': 'protected' if required == 'true' else 'open'}
 
 
-def validate_invite(expected_identity):
-    path = STATE / 'server-data/rendezvous-invite'
-    private(path, 10001, 10001, (0o600, 0o400))
-    need(path.stat().st_size <= 256, 'oversize invite')
-    match = re.fullmatch(r'atrinik-invite-v1\.([0-9a-f]{64})\.[0-9a-f]{32}\.[0-9a-f]{64}\.([1-9][0-9]{0,19})', path.read_text().strip())
-    need(match is not None and match[1] == expected_identity and int(match[2]) <= 2**64 - 1, 'invite identity binding invalid')
-    # Match native rendezvous_invite_valid_at: Unix whole seconds, no skew.
-    remaining = int(match[2]) - int(time.time())
-    need(0 < remaining <= 7 * 24 * 60 * 60, 'invitation expired or exceeds seven days; explicit renewal required')
+def access_paths(state):
+    policy = validate_config(state / 'config/server-custom.cfg')
+    obsolete = state / 'config/access-admin-accounts'
+    need(not obsolete.exists() and not obsolete.is_symlink(),
+         'obsolete access administrator file requires explicit offline migration')
+    store = state / 'server-data/access-tokens'
+    need(not store.is_symlink(), 'access store symlink forbidden')
+    if store.exists():
+        private(store, 10001, 10001, (0o700,), True)
+        need({path.name for path in store.iterdir()} == {'access-tokens.snapshot'}, 'unexpected access store contents')
+        private(store / 'access-tokens.snapshot', 10001, 10001, (0o600,))
+    else:
+        need(policy['policy'] == 'open', 'protected access store missing')
+    return policy
+
+
+def access_footprint(state):
+    """Bind complete authorization state, without recording credential contents."""
+    access_paths(state)
+    private(state / 'config/server-custom.cfg', 0, 10001, (0o440, 0o640))
+    private(state / 'server-data/quic-identity.pem', 10001, 10001, (0o600, 0o400))
+    paths = ['config/server-custom.cfg', 'server-data/quic-identity.pem']
+    snapshot = 'server-data/access-tokens/access-tokens.snapshot'
+    if (state / snapshot).exists():
+        paths.append(snapshot)
+    return {name: file_hash(state / name) for name in paths}
+
+
+def offline_access_status(state, pin, expected_identity, policy):
+    # The native inspector independently takes the existing data-directory lock,
+    # reads the full store without initialization/reconciliation, and never starts
+    # a server. Read-only mounts enforce that boundary even on an image regression.
+    inspect_image(pin)
+    verify_provenance(pin)
+    args = ['docker', 'run', '--rm', '--pull', 'never', '--platform', 'linux/amd64',
+            '--network', 'none', '--read-only', '--user', '10001:10001',
+            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+            '--pids-limit', '64', '--memory', '128m', '--cpus', '1',
+            '--mount', 'type=bind,src=' + str(state / 'server-data') + ',dst=/opt/atrinik/server/data,readonly',
+            '--entrypoint', '/opt/atrinik/server/atrinik-access-status', pin['image_id'],
+            '--data-dir', '/opt/atrinik/server/data',
+            '--store-dir', '/opt/atrinik/server/data/access-tokens',
+            '--certificate', '/opt/atrinik/server/data/quic-identity.pem', '--policy', policy]
+    return validate_access_status(access_json(command(*args, timeout=30)), expected_identity, policy)
+
+
+def validate_access(expected_identity, state=None, pin=None, name=None, admin=None):
+    state = STATE if state is None else state
+    pin = load(ROOT / 'pin.json') if pin is None else pin
+    name = CONTAINER if name is None else name
+    policy = access_paths(state)['policy']
+    if command('docker', 'ps', '-q', '--filter', 'name=^/' + re.escape(name) + '$'):
+        obj = json.loads(command('docker', 'inspect', name))[0]
+        if state == STATE:
+            validate_runtime(obj, pin)
+        capabilities = admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', obj['State']['Pid'], admin))
+        need('access-tokens-v1' in capabilities, 'native access-token status capability missing')
+        return admin_access_status(obj['State']['Pid'], expected_identity, policy, admin)
+    return offline_access_status(state, pin, expected_identity, policy)
 
 
 def validate_pin(pin):
@@ -249,6 +380,8 @@ def check_monotonic(candidate, ledger):
 
 
 def source():
+    if RELEASE_CHANNEL == 'development':
+        return core.DevelopmentSource(REPO, IMAGE, SIGNER_WORKFLOW, SOURCE_REF, DISCOVERY_TAG)
     return core.ReleaseSource(REPO, IMAGE, SIGNER_WORKFLOW)
 
 
@@ -263,11 +396,13 @@ def manifest(reference):
 amd64_child = core.amd64_child
 
 
-def verifier_args(directory, revision, workflow=SIGNER_WORKFLOW):
-    return core.verifier_args(directory, revision, VERIFIER_IMAGE, REPO, workflow)
+def verifier_args(directory, revision, workflow=None):
+    workflow = SIGNER_WORKFLOW if workflow is None else workflow
+    return core.verifier_args(directory, revision, VERIFIER_IMAGE, REPO, workflow,
+                              SOURCE_REF if RELEASE_CHANNEL == 'development' else None)
 
 
-def verify_index(raw, revision, workflow=SIGNER_WORKFLOW):
+def verify_index(raw, revision, workflow=None):
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
     attestations = api('/attestations/' + digest + '?per_page=30').get('attestations')
     return core.verify_index(raw, revision, attestations,
@@ -278,7 +413,7 @@ class ClassicAdapter:
     """Resolve current globals so service hooks retain their existing tests."""
     hooks = {'drain': 'admin_stop', 'capability': 'image_capability',
              'compatibility': 'accepted_compatibility', 'require_control': 'require_admin',
-             'validate_access': 'validate_invite', 'stop_isolated': 'graceful_stop'}
+             'stop_isolated': 'graceful_stop'}
 
     def __getattr__(self, name):
         return globals()[self.hooks.get(name, name)]
@@ -289,6 +424,8 @@ def activate(candidate, lock=None):
 
 
 def stage():
+    if RELEASE_CHANNEL == 'development':
+        return stage_development()
     release = api('/releases/latest')
     tag = validate_release(release)
     commit = api('/git/ref/tags/' + tag)['object']
@@ -320,6 +457,34 @@ def stage():
     atomic(ROOT / 'staged.json', candidate)
     return candidate
 
+def stage_development():
+    publication = source()
+    index_digest, raw = publication.manifest(DISCOVERY_TAG)
+    child_digest = amd64_child(raw)
+    _, child = publication.manifest(child_digest)
+    config_digest = json.loads(child).get('config', {}).get('digest')
+    need(isinstance(config_digest, str) and re.fullmatch('sha256:' + HEX, config_digest),
+         'invalid child config digest')
+    image = IMAGE + '@' + child_digest
+    command('docker', 'pull', '--platform', 'linux/amd64', image, timeout=900)
+    pulled = json.loads(command('docker', 'image', 'inspect', image))[0]
+    need(image in pulled.get('RepoDigests', []), 'pulled digest mismatch')
+    candidate = {'release_channel': 'development', 'version': '0.0.0',
+                 'revision': (pulled['Config'].get('Labels') or {}).get('org.opencontainers.image.revision', ''),
+                 'image': image, 'index_image': IMAGE + '@' + index_digest,
+                 'config_digest': config_digest, 'image_id': pulled['Id']}
+    check_monotonic(candidate, load(ROOT / 'ledger.json'))
+    inspect_image(candidate)
+    verify_provenance(candidate)
+    publication.check_discovery(candidate)
+    accepted_compatibility(candidate)
+    # Never execute candidate bytes before provenance, ordering and discovery
+    # checks have all completed. Initial acceptance is operator-owned.
+    image_capability(candidate)
+    atomic(ROOT / 'staged.json', candidate)
+    return candidate
+
+
 def verify_provenance(pin):
     validate_pin(pin)
     _, raw = manifest(pin['index_image'].split('@', 1)[1])
@@ -332,7 +497,8 @@ def verify_provenance(pin):
 def accepted_compatibility(pin):
     acceptance = load(ROOT / 'acceptance.json')
     need(acceptance.get('private_map_roundtrip') is True and type(acceptance.get('private_map_count')) is int and acceptance['private_map_count'] >= 5, 'actual private-map roundtrip acceptance required')
-    need(version(pin['version']) >= version(acceptance['minimum_version']), 'release predates accepted private-map fix')
+    if RELEASE_CHANNEL == 'stable':
+        need(version(pin['version']) >= version(acceptance['minimum_version']), 'release predates accepted private-map fix')
     revision = acceptance['source_revision']
     need(re.fullmatch(r'[0-9a-f]{40}', revision), 'invalid accepted source revision')
     if revision != pin['revision']:
@@ -344,7 +510,8 @@ def image_capability(pin):
     help_text = command('docker', 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none', '--user', '10001:10001',
                         '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                         '--entrypoint', '/opt/atrinik/server/atrinik-server', pin['image_id'], '--help')
-    need('admin_shutdown_socket' in help_text, 'published image lacks native countdown capability')
+    need('admin_shutdown_socket' in help_text and 'access_required' in help_text,
+         'published image lacks native countdown or access-token capability')
 
 
 def inspect_image(pin):
@@ -353,6 +520,8 @@ def inspect_image(pin):
     need(obj['Architecture'] == 'amd64' and obj['Os'] == 'linux', 'wrong image platform')
     need(obj['Id'] == pin['image_id'], 'image content hash mismatch')
     labels = obj['Config'].get('Labels') or {}
+    if RELEASE_CHANNEL == 'development':
+        need(labels.get('org.atrinik.release-channel') == 'development', 'OCI channel mismatch')
     for name, value in {'revision': pin['revision'], 'version': pin['version'], 'source': 'https://github.com/' + REPO}.items():
         need(labels.get('org.opencontainers.image.' + name) == value, 'OCI release provenance mismatch')
 
@@ -385,31 +554,130 @@ def healthy(name):
         time.sleep(5)
     raise Rejected('health timeout')
 
-def admin_request(request, expected_pid, admin=None):
+@contextlib.contextmanager
+def admin_connection(request, expected_pid, admin=None):
     admin = ADMIN if admin is None else admin
     private(admin.parent, 10001, 10001, (0o700,), True)
     info = admin.lstat()
     need(stat.S_ISSOCK(info.st_mode) and info.st_uid == 10001 and stat.S_IMODE(info.st_mode) == 0o600, 'unsafe admin socket')
+    encoded = request.encode('ascii') + b'\n'
+    need(len(encoded) <= 1024 and encoded.count(b'\n') == 1, 'invalid admin request')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(5)
         client.connect(str(admin))
         pid, uid, gid = struct.unpack('3i', client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         need(pid == expected_pid and uid == gid == 10001, 'wrong admin peer identity')
-        client.sendall(request.encode('ascii') + b'\n')
+        client.sendall(encoded)
         client.shutdown(socket.SHUT_WR)
+        yield client
+
+
+def admin_request(request, expected_pid, admin=None):
+    with admin_connection(request, expected_pid, admin) as client:
+        # Read through EOF so trailing frames cannot hide behind the first LF.
+        limit = 2048 if request == 'ATRINIK-ADMIN/1 CAPABILITIES' else 1024
         response = b''
-        while b'\n' not in response and len(response) <= 1024:
-            chunk = client.recv(1025 - len(response))
+        while len(response) <= limit:
+            chunk = client.recv(limit + 1 - len(response))
             if not chunk:
                 break
             response += chunk
-    need(len(response) <= 1024 and response.endswith(b'\n') and response.count(b'\n') == 1, 'malformed admin response')
-    return response.decode('ascii').strip()
+    need(len(response) <= limit and response.endswith(b'\n') and response.count(b'\n') == 1 and response.isascii(), 'malformed admin response')
+    return response[:-1].decode('ascii')
+
+
+def access_json(raw):
+    """No duplicate keys, non-JSON numbers or extra output from native status."""
+    need(isinstance(raw, (str, bytes)) and len(raw) <= 32768, 'invalid access status size')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            need(key not in result, 'duplicate access status field')
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise Rejected('non-JSON access status number')
+    try:
+        result = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+    except (ValueError, UnicodeError):
+        raise Rejected('malformed access status JSON') from None
+    need(type(result) is dict, 'invalid access status object')
+    return result
+
+
+def access_revision(value):
+    need(type(value) is str and re.fullmatch(r'0|[1-9][0-9]{0,19}', value) and
+         int(value) <= 2**64 - 1, 'invalid access store revision')
+    return value
+
+
+def validate_access_status(status, expected_identity, policy):
+    need(type(status) is dict and policy in ('open', 'protected'), 'invalid access status')
+    base = {'state', 'schemaVersion', 'serverIdentity', 'policy'}
+    need(type(status.get('schemaVersion')) is int and status['schemaVersion'] == 1 and
+         status.get('serverIdentity') == expected_identity and re.fullmatch(HEX, expected_identity) and
+         status.get('policy') == policy, 'access status identity, policy or schema mismatch')
+    if status.get('state') == 'absent_open':
+        need(policy == 'open' and set(status) == base, 'absent protected or malformed access store')
+    else:
+        need(status.get('state') == 'initialized' and
+             set(status) == base | {'integrity', 'durability', 'revision', 'pendingRouteSync'},
+             'unsupported access store status')
+        need(status['integrity'] == 'ok' and status['durability'] == 'ok', 'access store is not durably valid')
+        access_revision(status['revision'])
+        need(type(status['pendingRouteSync']) is int and 0 <= status['pendingRouteSync'] <= 1024,
+             'invalid pending access route count')
+    return status
+
+
+def admin_access_status(expected_pid, expected_identity, policy, admin=None):
+    request_id = secrets.token_hex(16)
+    request = {'schema': 'atrinik-access-admin-v1', 'operation': 'status', 'requestId': request_id}
+    with admin_connection('ATRINIK-ADMIN/1 ACCESS ' + json.dumps(request, separators=(',', ':')),
+                          expected_pid, admin) as client:
+        header = b''
+        while len(header) < 30 and not header.endswith(b'\n'):
+            chunk = client.recv(1)
+            need(bool(chunk), 'truncated access status header')
+            header += chunk
+        match = re.fullmatch(rb'ATRINIK-ADMIN/1 ACCESS ([1-9][0-9]{0,4})\n', header)
+        need(match is not None and int(match[1]) <= 32768, 'invalid access status framing')
+        length = int(match[1])
+        payload = b''
+        while len(payload) < length:
+            chunk = client.recv(length - len(payload))
+            need(bool(chunk), 'truncated access status body')
+            payload += chunk
+        need(client.recv(1) == b'', 'trailing access status bytes')
+    response = access_json(payload)
+    need(set(response) == {'schema', 'operation', 'requestId', 'outcome', 'revision', 'result'} and
+         response['schema'] == request['schema'] and response['operation'] == 'status' and
+         response['requestId'] == request_id and response['outcome'] == 'committed',
+         'access status response binding or outcome mismatch')
+    status = validate_access_status(response['result'], expected_identity, policy)
+    need(response['revision'] == status.get('revision'), 'access status revision mismatch')
+    return status
+
+
+def admin_capabilities(response):
+    """Parse the bounded native capability set; unknown tokens are extensible."""
+    prefix = 'ATRINIK-ADMIN/1 CAPABILITIES '
+    need(isinstance(response, str) and response.isascii() and
+         len(response) + 1 <= 2048 and response.startswith(prefix),
+         'malformed admin capabilities')
+    tokens = response[len(prefix):].split(' ')
+    need(1 <= len(tokens) <= 32 and
+         all(re.fullmatch(r'[a-z0-9-]{1,48}', token) for token in tokens) and
+         len(set(tokens)) == len(tokens), 'malformed admin capabilities')
+    capabilities = frozenset(tokens)
+    need({'shutdown-v1', 'durable-result-v1'} <= capabilities,
+         'native countdown capabilities missing')
+    return capabilities
 
 
 def require_admin(name):
     obj = json.loads(command('docker', 'inspect', name))[0]
-    need(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', obj['State']['Pid']) == 'ATRINIK-ADMIN/1 CAPABILITIES shutdown-v1 durable-result-v1', 'native countdown capability missing')
+    admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', obj['State']['Pid']))
 
 def admin_stop(name=None, admin=None):
     name = CONTAINER if name is None else name
@@ -421,7 +689,7 @@ def admin_stop(name=None, admin=None):
         validate_runtime(obj, load(ROOT / 'pin.json'))
     expected_id = obj['Id']
     pid = obj['State']['Pid']
-    need(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', pid, admin) == 'ATRINIK-ADMIN/1 CAPABILITIES shutdown-v1 durable-result-v1', 'published native countdown capability required')
+    admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', pid, admin))
     request_id = secrets.token_hex(16)
     result = admin.with_name(admin.name + '.' + request_id + '.result')
     need(not result.exists(), 'admin request result already exists')
@@ -478,8 +746,10 @@ def archive():
              'etc/systemd/system/' + UPDATE_TIMER]
     if CONFIG_PATH is not None and not CONFIG_PATH.is_relative_to(ROOT):
         paths.append(str(CONFIG_PATH).lstrip('/'))
+    authorization = access_footprint(STATE)
     core.archive_files(target, BACKUPS, paths, load(ROOT / 'pin.json')['image_id'], command)
-    atomic(target / 'manifest.json', {'sha256': file_hash(target / 'cohort.tar'), 'image_sha256': file_hash(target / 'image.tar'), 'pin': load(ROOT / 'pin.json'), 'identity': identity()})
+    need(access_footprint(STATE) == authorization, 'authorization changed during backup')
+    atomic(target / 'manifest.json', {'sha256': file_hash(target / 'cohort.tar'), 'image_sha256': file_hash(target / 'image.tar'), 'pin': load(ROOT / 'pin.json'), 'identity': identity(), 'access_state': authorization})
     return target
 
 def protected_saves(state):
@@ -503,6 +773,9 @@ def clone_check(backup, candidate):
     command('tar', '--acls', '--xattrs', '--numeric-owner', '-xpf', backup / 'cohort.tar', '-C', clone, str(STATE).lstrip('/'), timeout=1800)
     copy = clone / str(STATE).lstrip('/')
     saves_before = protected_saves(copy)
+    authorization = access_footprint(copy)
+    need(authorization == load(backup / 'manifest.json')['access_state'], 'cloned authorization differs from backup')
+    offline_access_status(copy, candidate, identity(copy), access_paths(copy)['policy'])
     admin_root = clone / 'admin'
     admin_root.mkdir(mode=0o700)
     os.chown(admin_root, 10001, 10001)
@@ -511,10 +784,12 @@ def clone_check(backup, candidate):
     try:
         command(*container_args(name, copy, candidate, True, admin_root))
         healthy(name)
+        validate_access(identity(copy), copy, candidate, name, admin_root / ADMIN.name)
         admin_stop(name, admin_root / ADMIN.name)
         obj = json.loads(command('docker', 'inspect', name))[0]
         need(obj['State']['ExitCode'] == 0, 'candidate unclean shutdown')
         need(identity(copy) == load(backup / 'manifest.json')['identity'], 'candidate identity changed')
+        need(access_footprint(copy) == authorization, 'isolated candidate changed access grants, audit or route state')
         need(protected_saves(copy) == saves_before, 'isolated candidate changed protected saves or private maps')
         # No map may disappear into quarantine. Current normal startup retains
         # legacy private maps; any future incompatible activation fails closed.
@@ -529,6 +804,10 @@ def restore(backup):
     manifest = load(backup / 'manifest.json')
     need(file_hash(backup / 'cohort.tar') == manifest['sha256'], 'rollback archive checksum mismatch')
     need(file_hash(backup / 'image.tar') == manifest['image_sha256'], 'rollback image archive checksum mismatch')
+    # A local operator or candidate may have committed a newer revocation while
+    # ingress was closed. Never replace it with an older authorization snapshot.
+    need(access_footprint(STATE) == manifest.get('access_state'),
+         'authorization changed after backup; explicit coherent recovery required')
     command('docker', 'image', 'load', '--input', backup / 'image.tar', timeout=1800)
     inspect_image(manifest['pin'])
     failed = STATE.with_name(STATE.name + '-failed-' + backup.name)
@@ -569,9 +848,10 @@ def validate_runtime(obj, pin):
     need(obj.get('Image') == pin['image_id'] and obj['Config']['Image'] == pin['image_id'] and obj['Config'].get('Labels', {}).get('org.atrinik.development.managed') == 'true', 'unexpected existing runtime')
     need(obj['Config']['User'] == '10001:10001' and obj['HostConfig']['NetworkMode'] == 'host', 'runtime security mismatch')
     mounts = {m['Destination']: (m['Source'], m['RW']) for m in obj['Mounts'] if m['Type'] == 'bind'}
-    need(mounts == {'/opt/atrinik/server/data': (str(STATE / 'server-data'), True),
-                    '/opt/atrinik/server/server-custom.cfg': (str(STATE / 'config/server-custom.cfg'), False),
-                    str(ADMIN.parent): (str(ADMIN.parent), True)}, 'runtime cohort mount mismatch')
+    expected_mounts = {'/opt/atrinik/server/data': (str(STATE / 'server-data'), True),
+                       '/opt/atrinik/server/server-custom.cfg': (str(STATE / 'config/server-custom.cfg'), False),
+                       str(ADMIN.parent): (str(ADMIN.parent), True)}
+    need(mounts == expected_mounts, 'runtime cohort mount mismatch')
 
 
 def launch(pin):
@@ -601,7 +881,7 @@ def run():
             launch(pin)
         healthy(CONTAINER)
         require_admin(CONTAINER)
-        validate_invite(identity())
+        validate_access(identity())
         fence()
         guard('public')
     return int(command('docker', 'wait', CONTAINER, timeout=365 * 86400))

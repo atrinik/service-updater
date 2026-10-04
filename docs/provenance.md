@@ -19,7 +19,13 @@ before draining the service.
 The digest-pinned updater image runs `gh attestation verify` on the raw index
 with `--bundle`, `--custom-trusted-root`, `--repo`, `--signer-workflow` and
 `--source-digest`; a successful nonempty result is required. The verifier has
-no network or host credentials. This public-bundle path avoids the login needed
+no network or host credentials. Development additionally constrains
+`--source-ref refs/heads/main`, `--deny-self-hosted-runners`, and
+`--predicate-type https://slsa.dev/provenance/v1`, alongside the configured
+repository, full source digest and exact development signer workflow. Workflow
+defaults resolve after deployment configuration is loaded. All candidate image execution
+follows signature, digest, source-order, label and discovery checks; retained
+pins use their immutable graph without a mutable-alias dependency. This public-bundle path avoids the login needed
 by default GitHub CLI online attestation lookup.
 
 The Dockerfile pins the official GitHub CLI 2.102.0 Linux/amd64 archive SHA-256

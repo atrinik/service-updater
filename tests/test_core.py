@@ -164,7 +164,7 @@ class ImageIdentity(unittest.TestCase):
     def test_all_server_runs_select_amd64(self):
         args=classic.container_args('test',Path('/fixture'),self.pin(),True)
         self.assertEqual(args[args.index('--platform')+1],'linux/amd64')
-        with patch.object(classic,'command',return_value='admin_shutdown_socket') as run:
+        with patch.object(classic,'command',return_value='admin_shutdown_socket access_required') as run:
             classic.image_capability(self.pin())
             args=run.call_args.args
             self.assertEqual(args[args.index('--platform')+1],'linux/amd64')

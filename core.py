@@ -116,8 +116,11 @@ class ReleaseSource:
              'X-GitHub-Api-Version': '2022-11-28'}))
 
 
+    def manifest_reference(self, reference):
+        return re.fullmatch(r'(?:sha256:[0-9a-f]{64}|[0-9]+\.[0-9]+\.[0-9]+)', reference)
+
     def manifest(self, reference):
-        need(re.fullmatch(r'(?:sha256:[0-9a-f]{64}|[0-9]+\.[0-9]+\.[0-9]+)', reference), 'invalid manifest reference')
+        need(isinstance(reference, str) and self.manifest_reference(reference), 'invalid manifest reference')
         token = json.loads(public_bytes('https://ghcr.io/token?service=ghcr.io&scope=repository:' + self.image[8:] + ':pull', limit=16384)).get('token')
         need(isinstance(token, str) and 0 < len(token) < 16000 and '\n' not in token, 'invalid anonymous registry token')
         raw = public_bytes('https://ghcr.io/v2/' + self.image[8:] + '/manifests/' + reference,
@@ -130,6 +133,12 @@ class ReleaseSource:
 
 
     def validate_pin(self, pin):
+        need(type(pin) is dict and pin.get('release_channel', 'stable') == 'stable', 'pin channel mismatch')
+        self.validate_image_pin(pin)
+        need(type(pin.get('release_id')) is int and pin['release_id'] > 0, 'invalid release identity')
+        return pin
+
+    def validate_image_pin(self, pin):
         version(pin['version'])
         need(not pin['version'].startswith('v'), 'pin version must omit tag prefix')
         need(re.fullmatch(re.escape(self.image) + '@sha256:' + HEX, pin['image']), 'invalid image digest')
@@ -138,7 +147,6 @@ class ReleaseSource:
         need(re.fullmatch('sha256:' + HEX, pin['image_id']), 'invalid immutable local image hash')
         need(pin['image_id'] in (pin['config_digest'], pin['image'].split('@', 1)[1], pin['index_image'].split('@', 1)[1]), 'engine image identity is outside attested graph')
         need(re.fullmatch(r'[0-9a-f]{40}', pin['revision']), 'invalid source revision')
-        need(type(pin['release_id']) is int and pin['release_id'] > 0, 'invalid release identity')
         return pin
 
 
@@ -158,11 +166,63 @@ class ReleaseSource:
 
     def check_monotonic(self, candidate, ledger):
         self.validate_pin(candidate)
-        for accepted in ledger.get('accepted', []):
+        need(type(ledger) is dict and type(ledger.get('accepted')) is list, 'invalid accepted ledger')
+        for accepted in ledger['accepted']:
+            self.validate_pin(accepted)
             if candidate['version'] == accepted['version'] or candidate['release_id'] == accepted['release_id']:
                 need(candidate == accepted, 'release retag or replacement rejected')
             need(version(candidate['version']) >= version(accepted['version']), 'downgrade rejected')
 
+
+
+class DevelopmentSource(ReleaseSource):
+    """Opt-in source-ordered OCI publications; no synthetic release identities."""
+    def __init__(self, repository, image, signer_workflow, source_ref, discovery_tag):
+        super().__init__(repository, image, signer_workflow)
+        need(re.fullmatch(r'refs/heads/[A-Za-z0-9_/-]+', source_ref) and '..' not in source_ref,
+             'invalid development source ref')
+        need(re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', discovery_tag), 'invalid discovery tag')
+        self.source_ref, self.discovery_tag = source_ref, discovery_tag
+
+    def manifest_reference(self, reference):
+        return (reference == self.discovery_tag or
+                re.fullmatch(r'(?:sha256:[0-9a-f]{64}|source-[0-9a-f]{40})', reference))
+
+    def validate_pin(self, pin):
+        fields = {'release_channel', 'version', 'revision', 'image', 'index_image',
+                  'config_digest', 'image_id'}
+        need(type(pin) is dict and set(pin) == fields, 'invalid development pin fields')
+        need(pin['release_channel'] == 'development' and pin['version'] == '0.0.0',
+             'development pin channel or version mismatch')
+        return self.validate_image_pin(pin)
+
+    def check_discovery(self, pin):
+        self.validate_pin(pin)
+        expected = pin['index_image'].split('@', 1)[1]
+        immutable, _ = self.manifest('source-' + pin['revision'])
+        alias, _ = self.manifest(self.discovery_tag)
+        need(immutable == expected and alias == expected,
+             'development source tag or discovery alias changed')
+
+    def check_monotonic(self, candidate, ledger):
+        self.validate_pin(candidate)
+        need(type(ledger) is dict and type(ledger.get('accepted')) is list, 'invalid accepted ledger')
+        for accepted in ledger['accepted']:
+            self.validate_pin(accepted)
+            if candidate['revision'] == accepted['revision']:
+                need(candidate == accepted, 'source revision reused with different image bytes')
+            else:
+                self.require_ancestor(accepted['revision'], candidate['revision'])
+
+    def require_ancestor(self, ancestor, revision):
+        need(re.fullmatch(r'[0-9a-f]{40}', ancestor) and re.fullmatch(r'[0-9a-f]{40}', revision),
+             'invalid ancestry revision')
+        if ancestor == revision:
+            return
+        comparison = self.api('/compare/' + ancestor + '...' + revision)
+        need(comparison.get('status') == 'ahead' and
+             comparison.get('merge_base_commit', {}).get('sha') == ancestor,
+             'source rollback or divergence rejected')
 
 
 def amd64_child(raw):
@@ -173,10 +233,10 @@ def amd64_child(raw):
     return manifests[0]['digest']
 
 
-def verifier_args(directory, revision, updater_image, repository, workflow):
+def verifier_args(directory, revision, updater_image, repository, workflow, source_ref=None):
     need(re.fullmatch(r'ghcr\.io/atrinik/service-updater@sha256:' + HEX, updater_image), 'updater verifier image must be pinned')
     need(re.fullmatch(r'[0-9a-f]{40}', revision), 'invalid verifier source revision')
-    return ['docker', 'run', '--rm', '--pull', 'never', '--network', 'none', '--read-only',
+    args = ['docker', 'run', '--rm', '--pull', 'never', '--network', 'none', '--read-only',
         '--user', '65532:65532', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
         '--pids-limit', '64', '--memory', '256m', '--cpus', '1',
         '--tmpfs', '/tmp:size=16m,mode=1777', '--env', 'HOME=/tmp', '--env', 'GH_CONFIG_DIR=/tmp/gh',
@@ -184,6 +244,11 @@ def verifier_args(directory, revision, updater_image, repository, workflow):
         '--entrypoint', '/usr/local/bin/gh', updater_image, 'attestation', 'verify', '/evidence/index.json',
         '--bundle', '/evidence/bundles.jsonl', '--custom-trusted-root', '/trusted-root.jsonl',
         '--repo', repository, '--signer-workflow', workflow, '--source-digest', revision, '--format', 'json']
+    if source_ref is not None:
+        need(re.fullmatch(r'refs/heads/[A-Za-z0-9_/-]+', source_ref), 'invalid verifier source ref')
+        args += ['--source-ref', source_ref, '--deny-self-hosted-runners',
+                 '--predicate-type', 'https://slsa.dev/provenance/v1']
+    return args
 
 
 def verify_index(raw, revision, attestations, args_builder, runner=command):

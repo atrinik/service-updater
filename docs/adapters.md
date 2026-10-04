@@ -7,6 +7,16 @@ manifest bytes and resolves one Linux/amd64 child. The core validates stable
 publication metadata, immutable pins, monotonically accepted versions,
 cryptographic source/workflow provenance and durable filesystem records.
 
+`core.DevelopmentSource(repository, image, signer_workflow, source_ref,
+discovery_tag)` adds opt-in OCI source publications. Reviewed adapters choose the
+canonical tuple. Pins carry `release_channel: development`, version `0.0.0`,
+a full source revision and the same immutable image graph; they never carry a
+GitHub release ID. Discovery checks both the mutable alias and `source-REVISION`
+tag against the captured index. Every accepted source must be an ancestor of
+the candidate; reused source revisions require an identical complete pin.
+Stable and development records cannot share a ledger. No service-specific
+repository, image or workflow is embedded in this helper.
+
 `core.activate(adapter, candidate, lock)` is the shared transaction. Production
 callers hold the service's root-owned flock for the entire operation. A single
 handoff unlocks around systemd's stop hook after a durable drain journal, then
