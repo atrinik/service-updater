@@ -3,7 +3,10 @@
 The Classic adapter uses official `atrinik/classic` releases,
 `ghcr.io/atrinik/classic-server`, and the signer workflow
 `atrinik/classic/.github/workflows/package-release.yml`. These are checked by its
-strict schema. Other service sources belong to other reviewed adapters.
+strict schema. Runtime containers must be Linux/amd64. Docker containerd
+manifest descriptors must match the selected child; an index-backed runtime
+without a child descriptor is rejected, while legacy config-backed runtimes
+remain supported. Other service sources belong to other reviewed adapters.
 
 Deployment configuration must establish the machine ID, state filesystem UUID,
 disk serial, separate backup filesystem, stopped production unit/container,

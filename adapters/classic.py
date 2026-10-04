@@ -521,6 +521,12 @@ def retain(backup):
             shutil.rmtree(old)
 
 def validate_runtime(obj, pin):
+    need(obj.get('Platform') == 'linux', 'runtime platform mismatch')
+    descriptor = obj.get('ImageManifestDescriptor')
+    if descriptor is not None:
+        need(descriptor.get('digest') == pin['image'].split('@', 1)[1] and descriptor.get('platform', {}).get('os') == 'linux' and descriptor.get('platform', {}).get('architecture') == 'amd64', 'runtime child manifest mismatch')
+    else:
+        need(pin['image_id'] != pin['index_image'].split('@', 1)[1], 'index-backed runtime requires selected child descriptor')
     need(obj.get('Image') == pin['image_id'] and obj['Config']['Image'] == pin['image_id'] and obj['Config'].get('Labels', {}).get('org.atrinik.development.managed') == 'true', 'unexpected existing runtime')
     need(obj['Config']['User'] == '10001:10001' and obj['HostConfig']['NetworkMode'] == 'host', 'runtime security mismatch')
     mounts = {m['Destination']: (m['Source'], m['RW']) for m in obj['Mounts'] if m['Type'] == 'bind'}

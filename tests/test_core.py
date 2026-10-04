@@ -170,13 +170,27 @@ class ImageIdentity(unittest.TestCase):
             self.assertEqual(args[args.index('--platform')+1],'linux/amd64')
     def test_actual_container_image_must_match_engine_identity(self):
         pin=self.pin()
-        runtime={'Image':pin['image_id'],'Config':{'Image':pin['image_id'],'User':'10001:10001','Labels':{'org.atrinik.development.managed':'true'}},'HostConfig':{'NetworkMode':'host'},'Mounts':[
+        runtime={'Platform':'linux','Image':pin['image_id'],'Config':{'Image':pin['image_id'],'User':'10001:10001','Labels':{'org.atrinik.development.managed':'true'}},'HostConfig':{'NetworkMode':'host'},'Mounts':[
             {'Type':'bind','Destination':'/opt/atrinik/server/data','Source':str(classic.STATE/'server-data'),'RW':True},
             {'Type':'bind','Destination':'/opt/atrinik/server/server-custom.cfg','Source':str(classic.STATE/'config/server-custom.cfg'),'RW':False},
             {'Type':'bind','Destination':str(classic.ADMIN.parent),'Source':str(classic.ADMIN.parent),'RW':True}]}
         classic.validate_runtime(runtime,pin)
         runtime['Image']='sha256:'+'e'*64
         with self.assertRaises(core.Rejected):classic.validate_runtime(runtime,pin)
+        runtime['Image']=pin['image_id']
+        runtime['Platform']='windows'
+        with self.assertRaises(core.Rejected):classic.validate_runtime(runtime,pin)
+        runtime['Platform']='linux'
+        indexpin=dict(pin,image_id=pin['index_image'].split('@')[1])
+        runtime['Image']=indexpin['image_id']
+        runtime['Config']['Image']=indexpin['image_id']
+        with self.assertRaisesRegex(core.Rejected,'selected child descriptor'):
+            classic.validate_runtime(runtime,indexpin)
+        runtime['ImageManifestDescriptor']={'digest':pin['image'].split('@')[1],'platform':{'architecture':'amd64','os':'linux'}}
+        classic.validate_runtime(runtime,indexpin)
+        runtime['ImageManifestDescriptor']['platform']['architecture']='arm64'
+        with self.assertRaisesRegex(core.Rejected,'child manifest'):
+            classic.validate_runtime(runtime,indexpin)
     def test_stable_major_zero_versions_supported(self):
         self.assertEqual(core.version('0.0.1'),(0,0,1))
         self.assertEqual(core.version('0.1.0'),(0,1,0))
