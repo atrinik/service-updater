@@ -291,4 +291,3 @@ def archive_files(target, backup_root, paths, image_id, runner=command):
             os.fsync(directory)
         finally:
             os.close(directory)
-

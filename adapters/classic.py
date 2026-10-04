@@ -596,4 +596,3 @@ def main():
         if args.action == 'update':
             activate(candidate, lock)
     return 0
-
