@@ -162,8 +162,12 @@ class Safety(unittest.TestCase):
                 return d.MACHINE
             return 'ConditionPathExists=!/etc/atrinik-production-migrated'
         def command(*args, **kwargs):
-            if '--property=Conditions' in args:
-                return 'ConditionPathExists negate=yes parameter=/etc/atrinik-production-migrated'
+            if args[0] == 'busctl':
+                if 'GetUnit' in args:
+                    return json.dumps({'type': 'o', 'data': ['/org/freedesktop/systemd1/unit/atrinik_2druntime_2eservice']})
+                if args[-1] == 'Id':
+                    return json.dumps({'type': 's', 'data': d.PRODUCTION_SERVICE})
+                return json.dumps({'type': 'a(sbbsi)', 'data': [['ConditionPathExists', False, True, str(d.PRODUCTION_MARKER), 0]]})
             if '--property=ActiveState' in args:
                 return 'inactive'
             if args[0] == 'findmnt':

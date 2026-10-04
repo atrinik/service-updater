@@ -21,7 +21,7 @@ it gets only a read-only mount containing public OCI metadata and attestations,
 no Docker socket, host PID/network namespace, home directory or credentials.
 This is a container-distributed updater with a host integration component.
 
-Deployment hosts need Python 3.10+, the ordinary Docker CLI, systemd, nftables,
+Deployment hosts need Python 3.10+, the ordinary Docker CLI, systemd with `busctl --json=short`, nftables,
 GNU tar/coreutils, util-linux and OpenSSL. They do not need GitHub CLI, Buildx,
 Node, a compiler, Git checkout, or server build dependencies. Server images are
 always pulled from published releases; the controller has no server build path.

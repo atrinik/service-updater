@@ -138,6 +138,46 @@ def identity(state=None):
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=True).stdout
     return hashlib.sha256(der).hexdigest()
 
+def busctl_value(signature, *args):
+    """Read one strictly typed result from the system manager's JSON interface."""
+    try:
+        result = json.loads(command('busctl', '--system', '--json=short', *args))
+    except (ValueError, TypeError) as error:
+        raise Rejected('invalid systemd D-Bus response') from error
+    need(type(result) is dict and set(result) == {'type', 'data'} and result['type'] == signature,
+         'unexpected systemd D-Bus signature')
+    return result['data']
+
+
+def loaded_production_fence():
+    # GetUnit only resolves an already loaded unit; never load/reload a unit as
+    # a side effect of validation. Check its canonical identity before reading
+    # conditions, rather than guessing systemd's escaped D-Bus object path.
+    service = 'org.freedesktop.systemd1'
+    unit_interface = service + '.Unit'
+    resolved = busctl_value('o', 'call', service, '/org/freedesktop/systemd1',
+                           service + '.Manager', 'GetUnit', 's', PRODUCTION_SERVICE)
+    need(type(resolved) is list and len(resolved) == 1 and type(resolved[0]) is str
+         and re.fullmatch(r'/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+', resolved[0]),
+         'invalid loaded systemd unit path')
+    path = resolved[0]
+    unit_id = busctl_value('s', 'get-property', service, path, unit_interface, 'Id')
+    need(type(unit_id) is str and unit_id == PRODUCTION_SERVICE, 'loaded systemd unit identity mismatch')
+    conditions = busctl_value('a(sbbsi)', 'get-property', service, path, unit_interface, 'Conditions')
+    need(type(conditions) is list, 'invalid loaded systemd conditions')
+    for condition in conditions:
+        need(type(condition) is list and len(condition) == 5, 'invalid loaded systemd condition tuple')
+        name, trigger, negate, parameter, state = condition
+        need(type(name) is str and type(trigger) is bool and type(negate) is bool
+             and type(parameter) is str and type(state) is int and -(2 ** 31) <= state < 2 ** 31,
+             'invalid loaded systemd condition fields')
+    # Non-trigger conditions are mandatory (AND), whereas trigger conditions
+    # can be satisfied by an unrelated alternative. State is only the result of
+    # the last evaluation: an unevaluated condition (0) is still configured.
+    need(any(condition[:4] == ['ConditionPathExists', False, True, str(PRODUCTION_MARKER)]
+             for condition in conditions), 'production start fence not loaded')
+
+
 def fence(require_pin=True):
     need(os.geteuid() == 0, 'root required')
     need(Path('/etc/machine-id').read_text().strip() == MACHINE, 'wrong machine')
@@ -145,8 +185,7 @@ def fence(require_pin=True):
     production_fence = PRODUCTION_FENCE
     private(production_fence, 0, modes=(0o600, 0o644))
     need('ConditionPathExists=!' + str(PRODUCTION_MARKER) in production_fence.read_text(), 'production start fence missing')
-    effective = command('systemctl', 'show', PRODUCTION_SERVICE, '--property=Conditions', '--value')
-    need('ConditionPathExists' in effective and 'negate=yes' in effective and 'parameter=' + str(PRODUCTION_MARKER) in effective, 'production start fence not loaded')
+    loaded_production_fence()
     need(command('systemctl', 'show', PRODUCTION_SERVICE, '--property=ActiveState', '--value') in ('inactive', 'failed'), 'production not stopped')
     need(not command('docker', 'ps', '-q', '--filter', 'name=^/' + re.escape(PRODUCTION_CONTAINER) + '$'), 'production container running')
     mount = json.loads(command('findmnt', '--json', '--mountpoint', STATE_MOUNT, '--output', 'SOURCE,UUID'))['filesystems'][0]
