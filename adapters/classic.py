@@ -243,7 +243,7 @@ def native_config(path):
     """
     controlled = {'access_required', 'access_initialize', 'access_store',
                   'access_admin_accounts', 'join_password', 'join_password_file',
-                  'rendezvous_invite_file', 'metaserver_hostname', 'server_desc'}
+                  'rendezvous_invite_file', 'metaserver_hostname', 'server_desc', 'server_public'}
     raw = path.read_bytes()
     need(len(raw) <= 1024 * 1024, 'oversize native configuration')
     values = {}
@@ -292,8 +292,21 @@ def native_config(path):
     return values
 
 
+def native_visibility(values):
+    # Visibility is independent of access policy and publication channel. Keep
+    # the historical public default only when no explicit native option exists.
+    public = values.get('server_public', 'true')
+    need(public in ('true', 'false'), 'server_public must be true or false')
+    return public
+
+
+def configured_visibility(state):
+    return native_visibility(native_config(state / 'config/server-custom.cfg'))
+
+
 def validate_config(path):
     values = native_config(path)
+    native_visibility(values)
     need(not any(name in values for name in ('join_password', 'join_password_file', 'rendezvous_invite_file')),
          'legacy access configuration requires explicit offline migration')
     required = values.get('access_required')
@@ -530,6 +543,7 @@ def guard(mode):
     command('nft', '--file', ROOT / (mode + '.nft'))
 
 def container_args(name, state, pin, isolated, admin_root=None):
+    public = 'false' if isolated else configured_visibility(state)
     args = ['docker', 'run', '--platform', 'linux/amd64', '--name', name, '--network', 'none' if isolated else 'host',
             '--user', '10001:10001', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
             '--tmpfs', '/tmp:size=32m,mode=1777', '--stop-timeout', '60',
@@ -537,7 +551,7 @@ def container_args(name, state, pin, isolated, admin_root=None):
             '--mount', f'type=bind,src={state}/config/server-custom.cfg,dst=/opt/atrinik/server/server-custom.cfg,readonly',
             '--env', 'HOME=/tmp', '--env', 'ATRINIK_HTTP_URL=off', '--env', 'ATRINIK_PORT_MAPPING=off',
             '--env', 'ATRINIK_NETWORK_STACK=ipv4', '--env', 'ATRINIK_QUIC_PORT=1730',
-            '--env', 'ATRINIK_SERVER_PUBLIC=' + ('false' if isolated else 'true'),
+            '--env', 'ATRINIK_SERVER_PUBLIC=' + public,
             '--health-cmd', '/usr/local/bin/atrinik-server-healthcheck', '--health-interval', '10s',
             '--health-timeout', '5s', '--health-retries', '3', '--health-start-period', '20s']
     if not isolated or admin_root:
@@ -686,7 +700,9 @@ def admin_stop(name=None, admin=None):
         return
     obj = json.loads(command('docker', 'inspect', name))[0]
     if name == CONTAINER:
-        validate_runtime(obj, load(ROOT / 'pin.json'))
+        # A stale visibility override must not prevent the authenticated
+        # countdown that stops it. All runtime identity fences still apply.
+        validate_runtime(obj, load(ROOT / 'pin.json'), check_visibility=False)
     expected_id = obj['Id']
     pid = obj['State']['Pid']
     admin_capabilities(admin_request('ATRINIK-ADMIN/1 CAPABILITIES', pid, admin))
@@ -838,7 +854,7 @@ def retain(backup):
         if old not in keep:
             shutil.rmtree(old)
 
-def validate_runtime(obj, pin):
+def validate_runtime(obj, pin, *, check_visibility=True):
     need(obj.get('Platform') == 'linux', 'runtime platform mismatch')
     descriptor = obj.get('ImageManifestDescriptor')
     if descriptor is not None:
@@ -852,6 +868,13 @@ def validate_runtime(obj, pin):
                        '/opt/atrinik/server/server-custom.cfg': (str(STATE / 'config/server-custom.cfg'), False),
                        str(ADMIN.parent): (str(ADMIN.parent), True)}
     need(mounts == expected_mounts, 'runtime cohort mount mismatch')
+    environment = obj['Config'].get('Env')
+    need(type(environment) is list and all(type(value) is str for value in environment),
+         'invalid runtime environment')
+    visibility = [value for value in environment if value.split('=', 1)[0] == 'ATRINIK_SERVER_PUBLIC']
+    if check_visibility:
+        need(visibility == ['ATRINIK_SERVER_PUBLIC=' + configured_visibility(STATE)],
+             'runtime visibility differs from native configuration')
 
 
 def launch(pin):

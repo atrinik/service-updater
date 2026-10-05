@@ -168,9 +168,10 @@ class ImageIdentity(unittest.TestCase):
             classic.image_capability(self.pin())
             args=run.call_args.args
             self.assertEqual(args[args.index('--platform')+1],'linux/amd64')
-    def test_actual_container_image_must_match_engine_identity(self):
+    @patch.object(classic, 'configured_visibility', return_value='true')
+    def test_actual_container_image_must_match_engine_identity(self, visibility):
         pin=self.pin()
-        runtime={'Platform':'linux','Image':pin['image_id'],'Config':{'Image':pin['image_id'],'User':'10001:10001','Labels':{'org.atrinik.development.managed':'true'}},'HostConfig':{'NetworkMode':'host'},'Mounts':[
+        runtime={'Platform':'linux','Image':pin['image_id'],'Config':{'Image':pin['image_id'],'User':'10001:10001','Env':['ATRINIK_SERVER_PUBLIC=true'],'Labels':{'org.atrinik.development.managed':'true'}},'HostConfig':{'NetworkMode':'host'},'Mounts':[
             {'Type':'bind','Destination':'/opt/atrinik/server/data','Source':str(classic.STATE/'server-data'),'RW':True},
             {'Type':'bind','Destination':'/opt/atrinik/server/server-custom.cfg','Source':str(classic.STATE/'config/server-custom.cfg'),'RW':False},
             {'Type':'bind','Destination':str(classic.ADMIN.parent),'Source':str(classic.ADMIN.parent),'RW':True}]}

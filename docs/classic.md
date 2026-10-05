@@ -47,6 +47,21 @@ Deployment installs its reviewed nftables rules as `closed.nft` and `public.nft`
 under the configured root. Both rules must retain the deployment's other fences;
 closed access must include loopback to prevent candidate writes before acceptance.
 
+Runtime visibility follows explicit `[meta] server_public=true|false` in
+`server-custom.cfg`, independently of access policy and release channel. The
+adapter passes the same value as `ATRINIK_SERVER_PUBLIC` because the image
+entrypoint translates that environment variable to a command-line option, which
+Classic parses after the configuration file. If the option is absent, the
+historical public default remains `true`. Isolated candidates always receive
+`false`. Quoted values, abbreviations, duplicate options, non-Boolean values and
+visibility settings outside `[meta]` are rejected. A retained live container
+whose visibility environment differs from the current configuration is rejected
+before access validation or opening ingress; configuration changes require the
+normal reviewed restart/update flow. Authenticated countdown stop still validates
+image, platform and mounts but does not require current desired visibility, so
+a stale public override can be stopped safely. Private code-only deployments specify both
+`server_public=false` and `access_required=true` and omit `metaserver_hostname`.
+
 The protected state cohort contains `server-data`, including its initialization
 marker, complete accounts/players/private maps and development QUIC certificate,
 plus `config/server-custom.cfg`. The adapter requires an explicit
