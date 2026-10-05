@@ -509,11 +509,18 @@ def verify_provenance(pin):
 
 def accepted_compatibility(pin):
     acceptance = load(ROOT / 'acceptance.json')
-    need(acceptance.get('private_map_roundtrip') is True and type(acceptance.get('private_map_count')) is int and acceptance['private_map_count'] >= 5, 'actual private-map roundtrip acceptance required')
-    if RELEASE_CHANNEL == 'stable':
-        need(version(pin['version']) >= version(acceptance['minimum_version']), 'release predates accepted private-map fix')
-    revision = acceptance['source_revision']
-    need(re.fullmatch(r'[0-9a-f]{40}', revision), 'invalid accepted source revision')
+    need(type(acceptance) is dict, 'invalid compatibility policy')
+    if 'compatibility_policy' in acceptance:
+        need(RELEASE_CHANNEL == 'development' and
+             acceptance['compatibility_policy'] == 'published-source' and
+             set(acceptance) == {'compatibility_policy', 'source_revision'},
+             'published-source compatibility policy is development-only')
+    else:
+        need(acceptance.get('private_map_roundtrip') is True and type(acceptance.get('private_map_count')) is int and acceptance['private_map_count'] >= 5, 'actual private-map roundtrip acceptance required')
+        if RELEASE_CHANNEL == 'stable':
+            need(version(pin['version']) >= version(acceptance['minimum_version']), 'release predates accepted private-map fix')
+    revision = acceptance.get('source_revision')
+    need(isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{40}', revision), 'invalid accepted source revision')
     if revision != pin['revision']:
         comparison = api('/compare/' + revision + '...' + pin['revision'])
         need(comparison.get('status') == 'ahead' and comparison.get('merge_base_commit', {}).get('sha') == revision, 'release does not include accepted compatibility fix')
