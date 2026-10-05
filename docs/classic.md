@@ -141,7 +141,14 @@ The configured root holds these root-owned mode-0600 records:
   least five, accepted `minimum_version`, and 40-digit `source_revision`.
   Create only after real restored-map load/save/logout/relogin acceptance.
   Later release revisions must descend from that accepted source revision.
-  Development still requires the actual map evidence and source ancestry;
+  Development may instead explicitly select the source-compatibility policy:
+  `{"compatibility_policy": "published-source", "source_revision": "<40-digit merged fix revision>"}`.
+  These are its only fields. It requires the published image source to equal or
+  descend from that revision; it makes no gameplay or round-trip claim.
+  For the merged private-map save fix, the source revision is
+  `c04b1b3ac81075c838ca2f31a3eeb0f2074d29bf`. Stable releases reject this
+  policy and retain the actual round-trip and minimum-version requirements.
+  Development can also retain the original actual round-trip policy;
   `minimum_version` applies only to stable releases.
 - `policy.json`: `activation_enabled`, initially false. Only Boolean true enables
   update activation; strings/numbers do not.
@@ -191,10 +198,13 @@ remain for investigation. Never delete a transaction to force a start. Retention
 keeps the first verified completed backup and six newest completed backups;
 failed/incomplete backups do not displace those slots.
 
-Unit tests and an image health result do not replace real deployment acceptance:
-a published native-interface image, real countdown/save evidence, all restored
-private-map gameplay checks, and development discovery/access must pass first. In particular, the native access
-inspector, initialized/absent-open status, checked token persistence, revocation
-and audit preservation need producer/consumer integration acceptance against the
-exact compatible published release. Mocked status fixtures do not prove native
-store parsing or distributed revocation behavior.
+The development `published-source` policy permits official published-image
+initialization without claiming private-map gameplay acceptance. It retains
+source provenance, ancestry, native token status, complete backups, isolated
+clone/save and unchanged-save checks, configured privacy and certificate identity.
+Stable releases and the original round-trip policy still require actual restored
+private-map gameplay evidence. Unit tests and an image health result do not prove
+that gameplay behavior. Development discovery/access and the native countdown/save
+interfaces remain checked by the updater against the exact published image.
+Mocked status fixtures do not prove native store parsing, gameplay or distributed
+revocation behavior; selecting source compatibility does not claim those results.
