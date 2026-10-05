@@ -54,7 +54,7 @@ class NativeConfiguration(unittest.TestCase):
     def test_recursive_config_and_every_controlled_prefix_alias_are_rejected(self):
         controlled = ('config', 'access_required', 'access_initialize', 'access_store',
                       'access_admin_accounts', 'join_password', 'join_password_file',
-                      'rendezvous_invite_file', 'metaserver_hostname', 'server_desc')
+                      'rendezvous_invite_file', 'metaserver_hostname', 'server_desc', 'server_public')
         aliases = {name[:length] for name in controlled for length in range(1, len(name))}
         for name in sorted(aliases | {'config'}):
             with self.subTest(name=name), self.assertRaises(d.Rejected):

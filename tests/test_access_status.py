@@ -212,7 +212,8 @@ class PolicyAndExecution(unittest.TestCase):
             args = d.container_args('fixture', state, {'image_id': 'fixture'}, True)
             self.assertFalse(any('access-admin-accounts' in arg for arg in args))
 
-    def test_runtime_contract_rejects_obsolete_account_mount(self):
+    @patch.object(d, 'configured_visibility', return_value='true')
+    def test_runtime_contract_rejects_obsolete_account_mount(self, visibility):
         pin = {'image_id': 'sha256:' + 'a' * 64,
                'index_image': 'fixture@sha256:' + 'b' * 64}
         mounts = [{'Type': 'bind', 'Destination': target, 'Source': source, 'RW': rw}
@@ -222,6 +223,7 @@ class PolicyAndExecution(unittest.TestCase):
                       (str(d.ADMIN.parent), str(d.ADMIN.parent), True))]
         runtime = {'Platform': 'linux', 'Image': pin['image_id'],
                    'Config': {'Image': pin['image_id'], 'User': '10001:10001',
+                              'Env': ['ATRINIK_SERVER_PUBLIC=true'],
                               'Labels': {'org.atrinik.development.managed': 'true'}},
                    'HostConfig': {'NetworkMode': 'host'}, 'Mounts': mounts}
         d.validate_runtime(runtime, pin)
