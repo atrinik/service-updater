@@ -18,3 +18,7 @@ and leave activation disabled by default.
 Only semantic-release publishes versions. No manual version tags, mutable image
 overwrite or unreviewed runtime adapters. Add services through reviewed code and
 strict configuration, never arbitrary configured shell hooks.
+
+Dependency review is advisory. Before merge, the Codex implementer reads its PR
+comment or job summary, fixes actionable introduced dependency risk, or records
+explicit maintainer acceptance of existing risk.
