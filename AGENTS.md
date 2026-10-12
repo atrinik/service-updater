@@ -18,3 +18,10 @@ and leave activation disabled by default.
 Only semantic-release publishes versions. No manual version tags, mutable image
 overwrite or unreviewed runtime adapters. Add services through reviewed code and
 strict configuration, never arbitrary configured shell hooks.
+
+Dependency review is advisory. Before merge, the Codex implementer reads the
+latest current-HEAD job summary even when a PR comment exists, fixes actionable
+introduced dependency risk, or records explicit maintainer acceptance of existing
+risk. Coverage requires the workflow to exist on the relevant PR/merge revision.
+License metadata does not certify compatibility; existing repository license
+policies still apply.
