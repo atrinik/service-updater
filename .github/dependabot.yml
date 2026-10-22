@@ -1,14 +1,53 @@
 version: 2
+# Minor and patch updates are grouped into one pull request per group;
+# major updates still open one pull request each. Cooldown waits for new
+# releases to settle before proposing them (security updates are not delayed).
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    groups:
+      npm-development:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
+      npm-production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      docker:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
