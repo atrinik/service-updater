@@ -16,6 +16,8 @@ updates:
           - patch
         patterns:
           - "*"
+    assignees:
+      - zoeyrose
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -38,6 +40,8 @@ updates:
           - patch
         patterns:
           - "*"
+    assignees:
+      - zoeyrose
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -51,3 +55,5 @@ updates:
           - patch
         patterns:
           - "*"
+    assignees:
+      - zoeyrose
