@@ -86,6 +86,10 @@ CI packages the updater image and runs
 `python3 scripts/smoke_public.py IMAGE_ID --local-image`. This verifies a real
 published Classic OCI index and rejects changed bytes, a wrong source commit,
 and a wrong signer workflow without login or network inside the verifier.
+Its GitHub API reads are anonymous by design, so they share the runner
+address's unauthenticated rate limit. The smoke retries only a 403 or 429 that
+carries `Retry-After` or `X-RateLimit-Remaining: 0`, waits as asked for at most
+five minutes in total, and otherwise fails with a `rate limited:` message.
 It does not start a game server. Live Classic activation requires an accepted
 published release supporting the countdown/save interface and actual private-map
 acceptance.
