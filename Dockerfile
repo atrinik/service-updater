@@ -1,5 +1,5 @@
 # Packaging happens in GitHub Actions. Deployment hosts pull this image.
-FROM node@sha256:6d2c7d5d074bf72f81ddc252b4fbb5d625bc028eeda49cb4b8c2ff8eda1ee617 AS verifier
+FROM node@sha256:e18c3ccdf7d71619990b0e85639f506e2028a95410999cab24cc373cbd10e0ac AS verifier
 WORKDIR /build
 ADD --checksum=sha256:bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386 https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.tar.gz /build/gh.tar.gz
 RUN tar -xzf gh.tar.gz && mkdir /out && cp gh_2.102.0_linux_amd64/bin/gh /out/gh && cp gh_2.102.0_linux_amd64/LICENSE /out/GITHUB-CLI-LICENSE
