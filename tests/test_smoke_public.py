@@ -4,6 +4,7 @@ import importlib.util
 import io
 from pathlib import Path
 import runpy
+import sys
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -89,9 +90,10 @@ class RateLimitRetry(unittest.TestCase):
                 self.assertIs(caught.exception, error)
                 self.assertEqual((len(fetch.calls), self.sleeps), (1, []))
 
-    def test_other_client_errors_are_never_retried(self):
+    def test_other_http_errors_are_never_retried(self):
         hints = {'Retry-After': '1', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(NOW + 1)}
-        for code, headers in ((400, hints), (401, hints), (404, hints), (422, hints), (429, {})):
+        for code, headers in ((400, hints), (401, hints), (404, hints), (422, hints), (429, {}),
+                              (500, hints), (503, {'Retry-After': '1'})):
             with self.subTest(code=code, headers=headers):
                 error = http_error(code, headers)
                 fetch = Fetch(error, b'{}')
@@ -132,6 +134,13 @@ class RateLimitRetry(unittest.TestCase):
         self.assertEqual(self.wrap(fetch)(URL), b'{}')
         self.assertEqual(self.sleeps, [300])
 
+    def test_retry_count_restarts_for_each_read(self):
+        limited = [http_error(429, {'Retry-After': '1'}) for _ in range(6)]
+        fetch = Fetch(*limited[:3], b'first', *limited[3:], b'second')
+        wrapped = self.wrap(fetch)
+        self.assertEqual((wrapped(URL), wrapped(URL)), (b'first', b'second'))
+        self.assertEqual(self.sleeps, [1] * 6)
+
     def test_retries_per_request_are_bounded(self):
         fetch = Fetch(*[http_error(429, {'Retry-After': '1'}) for _ in range(4)], b'late')
         with self.assertRaisesRegex(smoke.RateLimited, r'still returned HTTP 429 after 3 retries$'):
@@ -157,8 +166,8 @@ class SmokeWiring(unittest.TestCase):
     def test_smoke_reads_fail_as_rate_limited_not_bare_403(self):
         fetch = Fetch(exhausted(4102444800))
         argv = ['smoke_public.py', 'sha256:' + 'a' * 64, '--local-image']
-        with patch.object(core, 'public_bytes', fetch), patch('sys.argv', argv), \
-                self.assertRaises(SystemExit) as caught:
+        with patch.object(core, 'public_bytes', fetch), patch.object(sys, 'argv', argv), \
+                patch.object(sys, 'path', list(sys.path)), self.assertRaises(SystemExit) as caught:
             runpy.run_path(str(SCRIPT), run_name='__main__')
         self.assertRegex(str(caught.exception.code), r'^rate limited: https://api\.github\.com/repos/'
                          r'atrinik/classic/releases/latest returned HTTP 403 and asks for ')
